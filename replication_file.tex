@@ -1,0 +1,118 @@
+
+
+\documentclass[english,letter,11pt,twoside]{article}
+
+\usepackage{basilestyle2}
+\usepackage[bottom]{footmisc}
+\usepackage{ae,aecompl}
+\usepackage[english]{babel}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{booktabs,subfigure}
+\usepackage{comment}
+\usepackage{mathtools}
+%Some command to parametrize the marginal
+\geometry{vmargin=2.4cm,hmargin=2.6cm}
+
+%the paragraph space
+\setlength{\parindent}{0pt} 
+%\setlength{\parskip}{1ex plus 4.ex minus .2ex}
+
+%The space between lines
+\linespread{1.2}
+
+
+\usepackage{colortbl}
+%to use the command multi row in tables
+\usepackage{multirow}
+
+%three part table
+\usepackage[flushleft]{threeparttable}
+
+%multi columns table
+\usepackage{multicol}
+\setlength{\columnsep}{1cm}
+
+%better tabulate and line in tables
+\usepackage{booktabs}
+
+
+%some colors
+\def\tcr{\textcolor{red}}
+\def\tcb{\textcolor{blue}}
+\def\tcp{\textcolor{purple}}
+\def\rc{\textcolor{blue}{rc edits}}
+\begin{document}
+
+
+\begin{center}
+\subsection*{Data Generation}
+\subsubsection*{Backward Recursion}
+\end{center}
+
+Let's start from the last period, we assume that there is no scrap value in the dynamic problem, so $V_{T+1}(s_{t+1},a_{t+1}) = 0 $ for all $ s \in S$ and $a \in \{ 0,1\}$. We have:
+\begin{align*}
+\pi_T\left( s_T,a_T \right) &=  a_T \left[ - R - \nu(1) \right] + (1 - a_T) \left[ - \mu \cdot s - \nu(0) \right] \\
+V_T(s_T,a_T) &= \max_{a_T} \left[ - R - \nu(1) \right] + (1 - a_T) \left[ \mu \cdot s - \nu(0) \right] + \beta \mathbb{E} \left( \underbrace{V_{T+1}(s_{T+1},a_{T+1}}_{=0} \right) \\
+V_T(s_T,a_T) &= \max_{a_T} \pi_T\left( s_T,a_T \right) 
+\end{align*}
+Clearly given the discrete nature of the problem, the optimal problem has the following form:
+\begin{align*}
+\sigma_T(s_T,\nu) = 1 &\iff - R - \nu_T(1) \geq - \mu \cdot s_T - \nu_T(0) \\
+&\iff \mu \cdot s_T - R \geq \nu_T(1) - \nu_T(0)
+\end{align*}
+and given that $\nu(a) \sim N(0,1)$ for $a \in \{0,1\}$ then $\nu_T(1) - \nu_T(0) \sim N(\mu \cdot s - R , 2) \Rightarrow \Pr(a=1|s) = 1\Rightarrow \Phi \left( \frac{\mu \cdot s_T - R}{\sqrt{2}} \right)$. 
+
+At time $T-1$ the problem starts being dynamic, given that the action today determines the state tomorrow:
+\begin{align*}
+V_{T-1}(s_{T-1},a_{T-1}) &= \max_{a_{T-1}} a_{T-1}\left[ - R - \nu(1)_{T-1} \right] + (1 - a_{T-1}) \left[ \mu \cdot s_{T-1} - \nu_{T-1}(0) \right] + \beta \mathbb{E} \left[ V_T(s_T,a_T) \right]
+\end{align*}
+and the transition is given by $s_T = 1$ if $a_{T-1} = 1$ and $s_T = \min \{ s_{T-1}+1,S^{max}\}$.
+Define $\tilde{s}_t \equiv \min \{ s_{t-1}+1,S^{max}\}$
+\begin{align*}
+v_{T-1}(s_{T-1},1) &= - R + \beta \mathbb{E} \left( V_T(1,a_T) \right) \\
+&= - R + \beta \left( \Phi \left( \frac{\mu - R}{\sqrt{2}} \right)\cdot(-R) + \left(1 - \Phi \left( \frac{\mu - R}{\sqrt{2}} \right) \right) \cdot (-\mu ) \right)\\
+&= - R + \beta \left[ \Phi \left( \frac{\mu - R}{\sqrt{2}} \right)\left[ \mu  - R \right] \right] \\
+v_{T-1}(s_{T-1},0) &= -\mu \cdot s_{T-1} + \beta \mathbb{E} \left( V_T(\tilde{s}_{T-1},a_T) \right) \\
+&= - \mu \cdot s_{T-1} + \beta \left( \Phi \left( \frac{\mu \cdot \tilde{s}_{T} - R}{\sqrt{2}} \right) \cdot (-R) + \left( 1 - \Phi \left( \frac{\mu \cdot \tilde{s}_{T}-R}{\sqrt{2}} \right)\right)(-\mu \cdot\tilde{s}_{T})\right)
+\end{align*}
+Again given the unobserved shocks, the optimal decision rule at time $T-1$ can be written as:
+\begin{align*}
+V_{T-1} (s_{T-1},a_{T-1}) = \max_{a_{T-1}} \left( v_{T-1} (s_{T-1},1) + \nu(1) ,v_{T-1}(s_{T-1},0) + \nu(0) \right)
+\end{align*}
+which gives the decision rule:
+\begin{align*}
+\sigma_{T-1}(s_{T-1},\nu_{T-1}) = 1 & \iff v_{T-1} (s_{T-1},1) + \nu(1) \geq v_{T-1}(s_{T-1},0) + \nu(0)\\
+& \iff v_{T-1} (s_{T-1},1) - v_{T-1} (s_{T-1},0) \geq \nu(0) - \nu(1)
+\end{align*}
+so that
+\begin{align*}
+\Pr \left( \sigma_{T-1}(s_{T-1},\nu) = 1 \right) = \Phi \left( \frac{v_{T-1} (s_{T-1},1) - v_{T-1} (s_{T-1},0)}{\sqrt{2}} \right)
+\end{align*}
+
+To ease the notation we omit the state variables when referring to the optimal policy. Notice that $\Pr \left( \sigma_{T-1} = 1 \right) $ is of dimension $|S| \times 1$. Hence, recursively, we can define a matrix containing optimal cutoff rules. Assume we want to generate the data for $T$ periods\footnote{Assume also that $S=\{1,2,3,4,5\}$ so that $S^{max}=5$.}, then we define $\Sigma$ as the matrix of dimension $T \times S$ containing the cutoff rules for every period:
+$$
+\Sigma = 
+\begin{bmatrix}
+\Pr \left( \sigma_{T} = 1 \right)' \\
+\Pr \left( \sigma_{T-1} = 1 \right)' \\
+\vdots \\
+\Pr \left( \sigma_{0} = 1 \right)'
+\end{bmatrix}
+= \begin{bmatrix}
+\Phi \left( \frac{v_{T-1} (s_1,1) - v_{T-1} (s_1,0)}{\sqrt{2}} \right) & \hdots & \Phi \left( \frac{v_{T-1} (s_5,1) - v_{T-1} (s_5,0)}{\sqrt{2}} \right) \\
+\vdots & \hdots & \vdots \\
+\Phi \left( \frac{v_{0} (s_1,1) - v_{0} (s_1,0)}{\sqrt{2}} \right) & \hdots & \Phi \left( \frac{v_{T0} (s_5,1) - v_{0} (s_5,0)}{\sqrt{2}} \right)
+\end{bmatrix}
+$$
+\begin{center}
+\vspace*{2cm}
+\subsubsection*{Forward Data Simulation}
+\end{center}
+Finally, we can simulate forward $N$ observations so that the final artificial dataset will be of dimension $N \times T$.
+
+
+
+\end{document}
+
