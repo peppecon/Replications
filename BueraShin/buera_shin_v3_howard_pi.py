@@ -440,12 +440,15 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
                 print(f"  Converged!")
             break
 
-        # Price updates (more conservative for stability)
-        w_new = w * (1 + 0.3 * exc_L)
-        r_new = r + 0.01 * exc_K
+        # Price updates (adaptive for lambda=1 cases)
+        w_step = 0.3
+        r_step = 0.05 if lam < 1.5 else 0.01
 
-        w_new = max(0.01, min(2.0, w_new))
-        r_new = max(-0.06, min(0.12, r_new))
+        w_new = w * (1 + w_step * exc_L)
+        r_new = r + r_step * exc_K
+
+        w_new = max(0.01, min(2.5, w_new))
+        r_new = max(-0.20, min(0.12, r_new))
 
         # Balanced damping
         damping = 0.5
@@ -558,7 +561,7 @@ if __name__ == "__main__":
         result = find_equilibrium_fast(
             a_grid, z_grid, prob_z, params,
             w_init=w_init, r_init=r_init, V_init=V_init,
-            max_iter=100, tol=1e-3, verbose=True
+            max_iter=200, tol=1e-3, verbose=True
         )
         result['lambda'] = lam
         results_list.append(result)
