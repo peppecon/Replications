@@ -616,10 +616,10 @@ if __name__ == "__main__":
     ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
 
     plt.tight_layout()
-    plt.savefig('/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/figure2_replication_v3.png',
+    plt.savefig('plots/figure2_replication_v3.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("\nFigure 2 saved to 'figure2_replication_v3.png'")
+    print("\nFigure 2 saved to 'plots/figure2_replication_v3.png'")
 
     # Diagnostic plots
     fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
@@ -657,10 +657,10 @@ if __name__ == "__main__":
     axes2[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/figure2_diagnostics_v3.png',
+    plt.savefig('plots/figure2_diagnostics_v3.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("Diagnostic plots saved to 'figure2_diagnostics_v3.png'")
+    print("Diagnostic plots saved to 'plots/figure2_diagnostics_v3.png'")
 
     # ==========================================================================
     # Summary

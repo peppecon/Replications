@@ -40,7 +40,7 @@ ETA = 4.15       # Pareto tail parameter
 PSI = 0.894      # Probability of retaining ability
 
 print("=" * 60)
-print("Buera-Shin (2010) Replication - IMPROVED VERSION")
+print("Buera-Shin (2010) Replication - V1 BASELINE")
 print("Financial Frictions and the Persistence of History")
 print("=" * 60)
 
@@ -611,10 +611,10 @@ if __name__ == "__main__":
     ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
 
     plt.tight_layout()
-    plt.savefig('/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/figure2_replication.png',
+    plt.savefig('plots/figure2_replication_v1.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("\nFigure 2 saved to 'figure2_replication.png'")
+    print("\nFigure 2 saved to 'plots/figure2_replication_v1.png'")
 
     # ==========================================================================
     # Additional diagnostic plots
@@ -662,10 +662,10 @@ if __name__ == "__main__":
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/figure2_diagnostics.png',
+    plt.savefig('plots/figure2_diagnostics_v1.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("Diagnostic plots saved to 'figure2_diagnostics.png'")
+    print("Diagnostic plots saved to 'plots/figure2_diagnostics_v1.png'")
 
     # ==========================================================================
     # Summary table
