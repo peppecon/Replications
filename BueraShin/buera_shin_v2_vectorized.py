@@ -61,11 +61,11 @@ def create_ability_grid_paper(eta):
     return z_grid, prob_z
 
 
-def create_asset_grid(n_a, a_min, a_max, a_scale=2):
-    """Asset grid with curvature scaling"""
-    a_grid = a_min + (a_max - a_min) * np.linspace(0, 1, n_a) ** a_scale
-    a_grid[0] = max(a_grid[0], 1e-6)
-    return a_grid
+def create_asset_grid(n_a, a_min, a_max):
+    """Asset grid with logarithmic spacing for better precision at the bottom"""
+    grid = np.geomspace(a_min, a_max, n_a)
+    grid[0] = a_min
+    return grid
 
 
 # =============================================================================

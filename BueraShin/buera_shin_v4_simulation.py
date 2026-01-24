@@ -34,9 +34,13 @@ ETA = 4.15       # Pareto tail parameter
 PSI = 0.894      # Ability persistence
 
 print("=" * 60)
-print("Buera-Shin (2010) Replication - V3 FURTHER OPTIMIZED")
+print("Buera-Shin (2010) Replication - V4 SIMULATION")
 print("Financial Frictions and the Persistence of History")
 print("=" * 60)
+
+# Simulation Parameters (Appendix B.1)
+N_AGENTS = 350000
+T_SIM = 500
 
 
 # =============================================================================
@@ -61,11 +65,11 @@ def create_ability_grid_paper(eta):
     return z_grid, prob_z
 
 
-def create_asset_grid(n_a, a_min, a_max, a_scale=2):
-    """Asset grid with curvature scaling"""
-    a_grid = a_min + (a_max - a_min) * np.linspace(0, 1, n_a) ** a_scale
-    a_grid[0] = max(a_grid[0], 1e-6)
-    return a_grid
+def create_asset_grid(n_a, a_min, a_max):
+    """Asset grid with logarithmic spacing for better precision at the bottom"""
+    grid = np.geomspace(a_min, a_max, n_a)
+    grid[0] = a_min
+    return grid
 
 
 # =============================================================================
@@ -300,81 +304,137 @@ def solve_value_function_fast(a_grid, z_grid, prob_z, income_grid,
 
 
 # =============================================================================
-# Stationary Distribution - Optimized
+# Stationary Distribution - Simulation Method (Appendix B.1)
 # =============================================================================
 
 @njit(cache=True)
-def build_transition_sparse_data(policy_a_idx, n_a, n_z, prob_z, psi):
-    """Build sparse transition matrix data in a JIT-compiled function"""
-    nnz = n_a * n_z * n_z  # Maximum non-zeros
-    rows = np.zeros(nnz, dtype=np.int64)
-    cols = np.zeros(nnz, dtype=np.int64)
-    data = np.zeros(nnz)
+def get_interp_indices(x, x_grid):
+    """Get indices and weights for linear interpolation"""
+    n = len(x_grid)
+    if x <= x_grid[0]:
+        return 0, 0, 1.0
+    if x >= x_grid[-1]:
+        return n-2, n-1, 0.0
+    
+    # Binary search for interval
+    low = 0
+    high = n - 1
+    while high - low > 1:
+        mid = (low + high) // 2
+        if x_grid[mid] > x:
+            high = mid
+        else:
+            low = mid
+    
+    weight_low = (x_grid[high] - x) / (x_grid[high] - x_grid[low])
+    return low, high, weight_low
 
-    idx = 0
-    for i_a in range(n_a):
-        for i_z in range(n_z):
-            s = i_a * n_z + i_z
-            i_a_prime = policy_a_idx[i_a, i_z]
+@njit(cache=True, parallel=True)
+def simulation_step_fixed(a_current, z_idx_current, policy_a_vals, a_grid, 
+                         reset_shocks, ability_shocks):
+    """One period of simulation using pre-generated shocks for determinism"""
+    n_agents = len(a_current)
+    a_next = np.zeros(n_agents)
+    z_idx_next = np.zeros(n_agents, dtype=np.int64)
+    
+    for i in prange(n_agents):
+        # 1. Update Ability using fixed shocks
+        if reset_shocks[i]:
+            z_idx_next[i] = ability_shocks[i]
+        else:
+            z_idx_next[i] = z_idx_current[i]
+            
+        # 2. Update Assets (linear interpolation of policy)
+        a = a_current[i]
+        i_low, i_high, w_low = get_interp_indices(a, a_grid)
+        
+        pol_low = policy_a_vals[i_low, z_idx_current[i]]
+        pol_high = policy_a_vals[i_high, z_idx_current[i]]
+        a_next[i] = w_low * pol_low + (1.0 - w_low) * pol_high
+        
+    return a_next, z_idx_next
 
-            for i_z_prime in range(n_z):
-                if i_z_prime == i_z:
-                    p = psi + (1 - psi) * prob_z[i_z_prime]
-                else:
-                    p = (1 - psi) * prob_z[i_z_prime]
+@njit(cache=True, parallel=True)
+def compute_sim_aggregates_parallel(a_sim, z_idx_sim, a_grid, z_grid, w, r, lam, delta, alpha, upsilon):
+    """Compute aggregates from simulation cross-section using Numba reductions"""
+    n_agents = len(a_sim)
+    
+    K_sum = 0.0
+    L_sum = 0.0
+    Y_sum = 0.0
+    extfin_sum = 0.0
+    share_entre_sum = 0.0
+    A_sum = 0.0
+    
+    rental = max(r + delta, 1e-8)
+    wage = max(w, 1e-8)
+    span = 1 - upsilon
+    
+    for i in prange(n_agents):
+        a = a_sim[i]
+        z = z_grid[z_idx_sim[i]]
+        A_sum += a
+        
+        # Solve static problem
+        aux1 = (1/rental) * alpha * span * z
+        aux2 = (1/wage) * (1-alpha) * span * z
+        k1 = ( (aux1 ** (1-(1-alpha)*span)) * (aux2 ** ((1-alpha)*span)) ) ** (1/upsilon)
+        
+        kstar = min(k1, lam * a)
+        inside_lab = (1/wage) * (1-alpha) * span * z * (kstar ** (alpha * span))
+        lstar = inside_lab ** (1/(1-(1-alpha)*span))
+        
+        output = z * ((kstar ** alpha) * (lstar ** (1-alpha))) ** span
+        profit = output - wage * lstar - rental * kstar
+        
+        if profit > wage:
+            K_sum += kstar
+            L_sum += lstar
+            Y_sum += output
+            extfin_sum += max(0.0, kstar - a)
+            share_entre_sum += 1.0
+            
+    return (K_sum/n_agents, L_sum/n_agents, Y_sum/n_agents, 
+            A_sum/n_agents, extfin_sum/n_agents, share_entre_sum/n_agents)
 
-                if p > 1e-14:
-                    s_prime = i_a_prime * n_z + i_z_prime
-                    rows[idx] = s_prime
-                    cols[idx] = s
-                    data[idx] = p
-                    idx += 1
+def generate_fixed_shocks(n_agents, t_sim, psi, n_z, prob_z):
+    """Pre-generate shocks using compact memory types"""
+    print(f"   Pre-generating {n_agents} x {t_sim} shocks (uint8)...")
+    np.random.seed(42)
+    
+    # uint8 saves 8x memory vs int64/float64
+    reset_shocks = (np.random.random((t_sim, n_agents)) > psi).astype(np.uint8)
+    
+    cdf_z = np.cumsum(prob_z)
+    ability_shocks = np.zeros((t_sim, n_agents), dtype=np.uint8)
+    for t in range(t_sim):
+        ability_shocks[t, :] = np.searchsorted(cdf_z, np.random.random(n_agents)).astype(np.uint8)
+        
+    return reset_shocks, ability_shocks
 
-    return rows[:idx], cols[:idx], data[:idx]
-
-
-def compute_stationary_distribution_fast(policy_a_idx, a_grid, z_grid, prob_z, psi):
-    """Compute stationary distribution with optimized sparse operations"""
-    n_a, n_z = len(a_grid), len(z_grid)
-    n_states = n_a * n_z
-
-    rows, cols, data = build_transition_sparse_data(
-        policy_a_idx, n_a, n_z, prob_z, psi
+def run_simulation_appendix(a_grid, z_grid, prob_z, policy_a_idx, psi, w, r, lam, delta, alpha, upsilon, 
+                           fixed_shocks):
+    """Run full simulation with automatic size detection"""
+    reset_shocks, ability_shocks = fixed_shocks
+    t_sim, n_agents = reset_shocks.shape
+    
+    # Fixed initial state
+    np.random.seed(123)
+    a_current = np.ones(n_agents) * a_grid[0]
+    z_idx_current = np.random.randint(0, len(z_grid), n_agents)
+        
+    policy_a_vals = a_grid[policy_a_idx]
+    
+    for t in range(t_sim):
+        a_current, z_idx_current = simulation_step_fixed(
+            a_current, z_idx_current, policy_a_vals, a_grid, 
+            reset_shocks[t], ability_shocks[t]
+        )
+        
+    K, L, Y, A, extfin, share_entre = compute_sim_aggregates_parallel(
+        a_current, z_idx_current, a_grid, z_grid, w, r, lam, delta, alpha, upsilon
     )
-
-    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
-
-    # Power iteration (optimized)
-    mu = np.ones(n_states) / n_states
-    for _ in range(1000):
-        mu_new = Q @ mu
-        mu_new /= mu_new.sum()
-        if np.max(np.abs(mu_new - mu)) < 1e-14:
-            break
-        mu = mu_new
-
-    return mu_new.reshape((n_a, n_z))
-
-
-# =============================================================================
-# Aggregate Computation - Vectorized
-# =============================================================================
-
-def compute_aggregate_moments_fast(dist, a_grid, z_grid, is_entrep_grid,
-                                   kstar_grid, lstar_grid, output_grid):
-    """Compute aggregates using pre-computed grids (fully vectorized)"""
-    K = np.sum(dist * kstar_grid * is_entrep_grid)
-    L = np.sum(dist * lstar_grid * is_entrep_grid)
-    Y = np.sum(dist * output_grid * is_entrep_grid)
-
-    # External finance = max(k - a, 0) for entrepreneurs
-    a_broadcast = a_grid[:, np.newaxis]
-    extfin_grid = np.maximum(0, kstar_grid - a_broadcast) * is_entrep_grid
-    extfin = np.sum(dist * extfin_grid)
-
-    A = np.sum(dist * a_broadcast)
-    share_entre = np.sum(dist * is_entrep_grid)
-
+    
     return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 'share_entre': share_entre}
 
 
@@ -382,46 +442,41 @@ def compute_aggregate_moments_fast(dist, a_grid, z_grid, is_entrep_grid,
 # Equilibrium Solver
 # =============================================================================
 
-def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
+def find_equilibrium_sim(a_grid, z_grid, prob_z, params, fixed_shocks,
                           w_init=0.172, r_init=0.0476, V_init=None,
-                          max_iter=50, tol=1e-3, verbose=True):
-    """Find stationary equilibrium with warm-starting and optimizations"""
+                          max_iter=100, tol=1e-3, verbose=True):
+    """Find stationary equilibrium using simulation-based distribution"""
     delta, alpha, upsilon, lam, beta, sigma, psi = params
 
     w, r = w_init, r_init
     best_error = np.inf
     best_result = None
     V_current = V_init
-
-    # Adaptive adjustment parameters
+    
+    # Price adjustment parameters
     w_step = 0.3
     r_step = 0.05 if lam < 1.5 else 0.02
     exc_L_prev = 0.0
     exc_K_prev = 0.0
 
     for iteration in range(max_iter):
-        # Pre-compute ALL entrepreneur solutions for current prices
+        # 1. Pre-compute profit grid for VFI
         (profit_grid, kstar_grid, lstar_grid, output_grid,
          is_entrep_grid, income_grid) = precompute_entrepreneur_all(
             a_grid, z_grid, w, r, lam, delta, alpha, upsilon
         )
 
-        # Solve value function with warm start
+        # 2. Solve value function (optimized grid-based VFI)
         V_current, policy_a_idx = solve_value_function_fast(
             a_grid, z_grid, prob_z, income_grid,
             beta, sigma, psi, V_init=V_current,
             tol=1e-5, max_iter=500, n_howard=15, verbose=False
         )
 
-        # Compute stationary distribution
-        dist = compute_stationary_distribution_fast(
-            policy_a_idx, a_grid, z_grid, prob_z, psi
-        )
-
-        # Compute aggregates
-        agg = compute_aggregate_moments_fast(
-            dist, a_grid, z_grid, is_entrep_grid,
-            kstar_grid, lstar_grid, output_grid
+        # 3. Simulate to find distribution and compute aggregates
+        agg = run_simulation_appendix(
+            a_grid, z_grid, prob_z, policy_a_idx, psi, w, r, lam, delta, alpha, upsilon,
+            fixed_shocks
         )
 
         exc_K = agg['K'] - agg['A']
@@ -437,7 +492,7 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
             best_error = total_error
             best_result = {
                 'w': w, 'r': r, 'agg': agg.copy(),
-                'dist': dist.copy(), 'is_entrep': is_entrep_grid.copy(),
+                'is_entrep': is_entrep_grid.copy(),
                 'V': V_current.copy()
             }
 
@@ -445,6 +500,7 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
             if verbose:
                 print(f"  Converged!")
             break
+
         # Adaptive damping for oscillations (if sign flips, reduce step)
         if iteration > 0:
             if exc_L * exc_L_prev < 0:
@@ -510,6 +566,9 @@ if __name__ == "__main__":
     print(f"   Ability range: [{z_grid.min():.4f}, {z_grid.max():.4f}]")
     print(f"   Asset grid: {n_a} points, range [{a_grid.min():.6f}, {a_grid.max():.2f}]")
 
+    # Fixed shocks for simulation (Appendix B.1)
+    fixed_shocks = generate_fixed_shocks(N_AGENTS, T_SIM, PSI, n_z, prob_z)
+
     # JIT warmup
     print("\n   Warming up JIT compilation...")
     warmup_start = time.time()
@@ -532,8 +591,11 @@ if __name__ == "__main__":
     _ = howard_acceleration(V_test, policy_test, a_grid[:10], z_grid[:5], prob_z[:5],
                            income_test, BETA, SIGMA, PSI, 2)
 
-    # Warmup sparse builder
-    _ = build_transition_sparse_data(policy_test, 10, 5, prob_z[:5], PSI)
+    # Warmup simulation
+    policy_test = np.zeros((10, 5), dtype=np.int64)
+    dummy_fixed = (np.zeros((2, 10), dtype=np.uint8), np.zeros((2, 10), dtype=np.uint8))
+    _ = run_simulation_appendix(a_grid[:10], z_grid[:5], prob_z[:5], policy_test, PSI, 
+                                 1.0, 0.04, 2.0, DELTA, ALPHA, NU, dummy_fixed)
 
     print(f"   JIT warmup: {time.time() - warmup_start:.1f}s")
 
@@ -571,12 +633,11 @@ if __name__ == "__main__":
             V_init = None
         else:
             w_init, r_init = prev_w, prev_r
-            V_init = prev_V  # Warm start from previous solution
-
-        result = find_equilibrium_fast(
-            a_grid, z_grid, prob_z, params,
+            V_init = prev_V
+        result = find_equilibrium_sim(
+            a_grid, z_grid, prob_z, params, fixed_shocks,
             w_init=w_init, r_init=r_init, V_init=V_init,
-            max_iter=200, tol=1e-3, verbose=True
+            max_iter=100, tol=2e-3, verbose=True
         )
         result['lambda'] = lam
         results_list.append(result)
@@ -631,10 +692,10 @@ if __name__ == "__main__":
     ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
 
     plt.tight_layout()
-    plt.savefig('plots/figure2_replication_v3.png',
+    plt.savefig('plots/figure2_replication_v4.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("\nFigure 2 saved to 'plots/figure2_replication_v3.png'")
+    print("\nFigure 2 saved to 'plots/figure2_replication_v4.png'")
 
     # Diagnostic plots
     fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
@@ -672,10 +733,10 @@ if __name__ == "__main__":
     axes2[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('plots/figure2_diagnostics_v3.png',
+    plt.savefig('plots/figure2_diagnostics_v4.png',
                 dpi=150, bbox_inches='tight')
     plt.close()
-    print("Diagnostic plots saved to 'plots/figure2_diagnostics_v3.png'")
+    print("Diagnostic plots saved to 'plots/figure2_diagnostics_v4.png'")
 
     # ==========================================================================
     # Summary
