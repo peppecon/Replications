@@ -440,18 +440,15 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
                 print(f"  Converged!")
             break
 
-        # Price updates with adaptive step sizes and momentum
-        step_w = 0.4 if abs(exc_L) > 0.1 else 0.6
-        step_r = 0.05 * abs(exc_K) + 0.01
-
-        w_new = w * (1 + step_w * exc_L)
-        r_new = r + step_r * exc_K
+        # Price updates (more conservative for stability)
+        w_new = w * (1 + 0.3 * exc_L)
+        r_new = r + 0.01 * exc_K
 
         w_new = max(0.01, min(2.0, w_new))
         r_new = max(-0.06, min(0.12, r_new))
 
-        # Damping logic
-        damping = 0.5 if iteration < 20 else 0.7
+        # Balanced damping
+        damping = 0.5
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
 
