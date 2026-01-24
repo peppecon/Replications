@@ -393,6 +393,12 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
     best_result = None
     V_current = V_init
 
+    # Adaptive adjustment parameters
+    w_step = 0.3
+    r_step = 0.05 if lam < 1.5 else 0.02
+    exc_L_prev = 0.0
+    exc_K_prev = 0.0
+
     for iteration in range(max_iter):
         # Pre-compute ALL entrepreneur solutions for current prices
         (profit_grid, kstar_grid, lstar_grid, output_grid,
@@ -440,20 +446,28 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
                 print(f"  Converged!")
             break
 
-        # Price updates (adaptive for lambda=1 cases)
-        w_step = 0.3
-        r_step = 0.05 if lam < 1.5 else 0.01
+        # Adaptive damping for oscillations (if sign flips, reduce step)
+        if iteration > 0:
+            if exc_L * exc_L_prev < 0:
+                w_step *= 0.5
+            if exc_K * exc_K_prev < 0:
+                r_step *= 0.5
 
+        # Price updates
         w_new = w * (1 + w_step * exc_L)
         r_new = r + r_step * exc_K
 
         w_new = max(0.01, min(2.5, w_new))
         r_new = max(-0.20, min(0.12, r_new))
 
-        # Balanced damping
+        # Damping logic
         damping = 0.5
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
+
+        # Store for next iteration
+        exc_L_prev = exc_L
+        exc_K_prev = exc_K
 
     result = best_result
     agg = result['agg']
@@ -530,7 +544,7 @@ if __name__ == "__main__":
     print("2. Computing Figure 2: Long-run Effect of Financial Frictions")
     print("=" * 60)
 
-    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.0]
+    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.2, 1.15, 1.1, 1.0]
 
     initial_guesses = {
         np.inf: (0.171, 0.0472),
