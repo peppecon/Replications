@@ -169,9 +169,8 @@ def find_optimal_savings_monotone(income, a_grid, EV_row, beta, sigma, start_idx
         if val > best_val:
             best_val = val
             best_idx = i_a_prime
-        elif val < best_val - 1e-8:
-            # Due to concavity, once value starts decreasing, we can stop
-            break
+        # REMOVED: elif val < best_val - 1e-8: break
+        # We search the full range to avoid local maxima from occupational kinks.
 
     return best_val, best_idx
 
@@ -347,10 +346,10 @@ def compute_stationary_distribution_fast(policy_a_idx, a_grid, z_grid, prob_z, p
 
     # Power iteration (optimized)
     mu = np.ones(n_states) / n_states
-    for _ in range(300):
+    for _ in range(1000):
         mu_new = Q @ mu
         mu_new /= mu_new.sum()
-        if np.max(np.abs(mu_new - mu)) < 1e-12:
+        if np.max(np.abs(mu_new - mu)) < 1e-14:
             break
         mu = mu_new
 
@@ -441,9 +440,9 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
                 print(f"  Converged!")
             break
 
-        # Price updates with adaptive step sizes
-        step_w = 0.3 if abs(exc_L) > 0.05 else 0.5
-        step_r = 0.01 if abs(exc_K) > 0.5 else 0.02
+        # Price updates with adaptive step sizes and momentum
+        step_w = 0.4 if abs(exc_L) > 0.1 else 0.6
+        step_r = 0.05 * abs(exc_K) + 0.01
 
         w_new = w * (1 + step_w * exc_L)
         r_new = r + step_r * exc_K
@@ -451,7 +450,8 @@ def find_equilibrium_fast(a_grid, z_grid, prob_z, params,
         w_new = max(0.01, min(2.0, w_new))
         r_new = max(-0.06, min(0.12, r_new))
 
-        damping = 0.5
+        # Damping logic
+        damping = 0.5 if iteration < 20 else 0.7
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
 
