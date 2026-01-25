@@ -326,7 +326,45 @@ if __name__ == "__main__":
         p = (DELTA, ALPHA, NU, lam, BETA, SIGMA, PSI)
         res = find_equilibrium(p, method=args.method, fixed_shocks=sh, w_init=w_i, r_init=r_i, coeffs_init=c_i)
         res['lambda'] = lam; results.append(res); w_i, r_i, c_i = res['w'], res['r'], res['coeffs']
-    print(f"\n3. Results Summary\n{'Lambda':>8} {'GDP':>10} {'r':>10} {'w':>10} {'K/A':>10}\n" + "-"*50)
+    print("\n3. Results Summary")
+    print(f"{'Lambda':>8} {'GDP':>10} {'r':>10} {'w':>10} {'K/A':>10} {'TFP':>10}")
+    print("-" * 65)
+    
+    Y_bench = results[0]['Y']
+    K_bench = results[0]['K']
+    plot_data = {'lam':[], 'gdp':[], 'r':[], 'tfp':[], 'k':[]}
+    
     for r in results:
         lam_s = "inf" if r['lambda'] == np.inf else f"{r['lambda']:.2f}"
-        print(f"{lam_s:>8} {r['Y']:>10.4f} {r['r']:>10.4f} {r['w']:>10.4f} {r['K']/r['A']:>10.4f}")
+        span = 1 - NU
+        L_s = 1.0 - r['share_entre']
+        # Aggregate TFP = Y / (K^alpha * L^(1-alpha))^span
+        denom_tfp = ( (r['K']**ALPHA * L_s**(1-ALPHA))**span )
+        curr_tfp = r['Y'] / max(denom_tfp, 1e-8)
+        
+        print(f"{lam_s:>8} {r['Y']:>10.4f} {r['r']:>10.4f} {r['w']:>10.4f} {r['K']/r['A']:>10.4f} {curr_tfp:>10.4f}")
+        
+        if r['lambda'] != np.inf:
+            plot_data['lam'].append(r['lambda'])
+            plot_data['gdp'].append(r['Y'] / Y_bench)
+            plot_data['r'].append(r['r'])
+            plot_data['tfp'].append(curr_tfp)
+            plot_data['k'].append(r['K'] / K_bench)
+
+    # Plotting Figure 2
+    os.makedirs("plots", exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes[0,0].plot(plot_data['lam'], plot_data['gdp'], 'o-', lw=2); axes[0,0].set_title("Aggregate Output (Rel to inf)")
+    axes[0,1].plot(plot_data['lam'], plot_data['r'], 's-', color='red', lw=2); axes[0,1].set_title("Interest Rate (r)")
+    axes[1,0].plot(plot_data['lam'], plot_data['tfp'], '^-', color='green', lw=2); axes[1,0].set_title("Aggregate TFP")
+    axes[1,1].plot(plot_data['lam'], plot_data['k'], 'd-', color='purple', lw=2); axes[1,1].set_title("Aggregate Capital (Rel to inf)")
+    
+    for ax in axes.flat:
+        ax.set_xlabel("Financial Frictions (Lambda)")
+        ax.grid(True, alpha=0.3)
+        if len(plot_data['lam']) > 1:
+            ax.set_xlim(max(plot_data['lam']), min(plot_data['lam']))
+            
+    plt.tight_layout()
+    plt.savefig("plots/figure2_replication_v5_chebyshev.png")
+    print(f"\n[SUCCESS] Figure 2 saved to plots/figure2_replication_v5_chebyshev.png")
