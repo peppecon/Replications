@@ -1,0 +1,6 @@
+__pycache__/
+*.nbc
+*.nbi
+*.png
+*.pdf
+.DS_Store
