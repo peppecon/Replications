@@ -410,7 +410,7 @@ if __name__ == "__main__":
     print("2. Computing Figure 2: Long-run Effect of Financial Frictions")
     print("=" * 60)
 
-    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.0]
+    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.35, 1.25, 1.0]
 
     initial_guesses = {
         np.inf: (0.171, 0.0472),
