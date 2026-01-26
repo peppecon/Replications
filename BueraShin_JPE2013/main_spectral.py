@@ -359,7 +359,7 @@ if __name__ == "__main__":
         print(f"  Scale: {N_AGENTS} agents over {T_SIM} periods\n\n1. Pre-generating Shocks...")
         np.random.seed(42); s_r = (np.random.rand(T_SIM, N_AGENTS) > PSI).astype(np.uint8)
         s_w = np.random.randint(0, 256, (T_SIM, N_AGENTS), dtype=np.uint8); sh = (s_r, s_w)
-    lambdas = [np.inf, 2.0, 1.5, 1.0]; results = []; w_i, r_i, c_i = 1.5, 0.0450, None
+    lambdas = [np.inf, 2.0, 1.5, 1.35, 1.0]; results = []; w_i, r_i, c_i = 1.5, 0.0450, None
     for lam in lambdas:
         print(f"\n--- Lambda = {lam} ---")
         p = (DELTA, ALPHA, NU, lam, BETA, SIGMA, PSI)
