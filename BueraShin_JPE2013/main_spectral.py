@@ -42,8 +42,8 @@ A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0  
 # Paper's discretization (v3 bounds): M=0.633 (e ~ 1.2675) and 0.9995 (e ~ 6.2164)
 Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 24
-N_CHEBY_Z = 40  
+N_CHEBY_A = 20
+N_CHEBY_Z = 20  
 
 # Simulation Parameters
 N_AGENTS = 100000
