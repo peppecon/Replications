@@ -1,12 +1,12 @@
 """
 Replication of Buera & Shin (2010) - JPE
-VERSION 5: BIVARIATE SPECTRAL COLLOCATION (HYBRID ANALYTI CAL)
+VERSION 6: PERFORMANCE SUPERCHARGED SPECTRAL COLLOCATION
 
-Features:
-1. Chebyshev nodes for both wealth (a) and ability (z)
-2. Hybrid Stationary Distribution: --method analytical (Histogram) or --method simulation (Monte Carlo)
-3. Log-Mapping for Assets to capture policy curvature
-4. Walrasian adjustment with exponential adaptive damping
+Performance Innovations:
+1. Matrix-Matrix Chebyshev evaluation (BLAS-optimized)
+2. Stationary distribution warm-start (Power Iteration)
+3. Vectorized integration and early-exit policy solving
+4. Adaptive Walrasian clearing (stability maintained)
 """
 
 import numpy as np
@@ -40,8 +40,8 @@ PSI = 0.894      # Persistence
 # Global Grid Bounds
 A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0  
-# Paper's discretization begins at M=0.633 (e ~ 1.27)
-Z_MIN, Z_MAX = 1.25, 6.5  
+# Paper's discretization (v3 bounds): M=0.633 (e ~ 1.2675) and 0.9995 (e ~ 6.2164)
+Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
 N_CHEBY_A = 24
 N_CHEBY_Z = 40  
 
@@ -60,24 +60,38 @@ def bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max):
     xa = max(-1.0, min(1.0, 2.0 * (la - lmin) / (lmax - lmin) - 1.0))
     xz = max(-1.0, min(1.0, 2.0 * (z - z_min) / (z_max - z_min) - 1.0))
     
-    val, idx = 0.0, 0
-    ta_m2, ta_m1 = 1.0, xa
-    for ia in range(na):
-        if ia == 0: t_a = 1.0
-        elif ia == 1: t_a = xa
-        else:
-            t_a = 2.0 * xa * ta_m1 - ta_m2
-            ta_m2, ta_m1 = ta_m1, t_a
-        tz_m2, tz_m1 = 1.0, xz
-        for iz in range(nz):
-            if iz == 0: t_z = 1.0
-            elif iz == 1: t_z = xz
-            else:
-                t_z = 2.0 * xz * tz_m1 - tz_m2
-                tz_m2, tz_m1 = tz_m1, t_z
-            val += coeffs[idx] * t_a * t_z
-            idx += 1
+    # 1D Chebyshev components
+    Ta = np.zeros(na); Ta[0] = 1.0
+    if na > 1: Ta[1] = xa
+    for i in range(2, na): Ta[i] = 2.0 * xa * Ta[i-1] - Ta[i-2]
+    Tz = np.zeros(nz); Tz[0] = 1.0
+    if nz > 1: Tz[1] = xz
+    for j in range(2, nz): Tz[j] = 2.0 * xz * Tz[j-1] - Tz[j-2]
+    
+    # Outer product contraction: val = sum_ij C_ij * Ta_i * Tz_j
+    val = 0.0
+    C = coeffs.reshape((na, nz))
+    for i in range(na):
+        row_sum = 0.0
+        for j in range(nz): row_sum += C[i, j] * Tz[j]
+        val += Ta[i] * row_sum
+        
     return max(a_min, min(val, a_max))
+
+def bivariate_eval_matrix(a_vec, z_vec, coeffs, a_min, a_max, z_min, z_max):
+    """Batch evaluation for grids: Y = Ta @ C @ Tz.T"""
+    na, nz = N_CHEBY_A, N_CHEBY_Z
+    lmin, lmax = np.log(a_min + A_SHIFT), np.log(a_max + A_SHIFT)
+    xa_vec = 2.0 * (np.log(a_vec + A_SHIFT) - lmin) / (lmax - lmin) - 1.0
+    xz_vec = 2.0 * (z_vec - z_min) / (z_max - z_min) - 1.0
+    
+    # Linear projection matrices
+    Ta = Chebyshev_Polynomials_Recursion_mv(xa_vec, na).T # (len(a_vec), na)
+    Tz = Chebyshev_Polynomials_Recursion_mv(xz_vec, nz).T # (len(z_vec), nz)
+    
+    C = coeffs.reshape((na, nz))
+    res = Ta @ C @ Tz.T
+    return np.clip(res, a_min, a_max)
 
 def generate_bivariate_nodes_matrix(a_min, a_max, z_min, z_max):
     cheb_a = Chebyshev_Nodes(N_CHEBY_A).ravel()
@@ -197,14 +211,18 @@ def get_interpolation_weights(x, grid):
     w2 = (x - grid[idx]) / (grid[idx+1] - grid[idx])
     return idx, 1.0 - w2, w2
 
-def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi):
+def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=None):
     na, nz = len(a_grid), len(z_grid)
     n_states = na * nz
+    
+    # Batch evaluate policies for speed
+    A_prime_mat = bivariate_eval_matrix(a_grid, z_grid, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
+    
     rows, cols, data = [], [], []
     for i_a in range(na):
         for i_z in range(nz):
             s = i_a * nz + i_z
-            aprime = bivariate_eval(a_grid[i_a], z_grid[i_z], coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
+            aprime = A_prime_mat[i_a, i_z]
             ia_low, w1, w2 = get_interpolation_weights(aprime, a_grid)
             for i_zp in range(nz):
                 p_z = (psi + (1-psi)*prob_z[i_zp]) if i_zp == i_z else (1-psi)*prob_z[i_zp]
@@ -214,6 +232,16 @@ def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi):
                     if w2 > 1e-9:
                         rows.append((ia_low+1) * nz + i_zp); cols.append(s); data.append(p_z * w2)
     Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+    
+    # Warm-start Power Iteration (Much faster than eigs)
+    if mu_init is not None:
+        mu = mu_init
+        for _ in range(50):
+            mu_new = Q @ mu
+            if np.max(np.abs(mu_new - mu)) < 1e-9: break
+            mu = mu_new
+        return (mu / mu.sum()).reshape((na, nz))
+    
     try:
         vals, vecs = eigs(Q, k=1, which='LM')
         mu = np.abs(vecs[:, 0].real)
@@ -252,10 +280,26 @@ def get_aggregates_parallel(a_vec, z_vec, w, r, lam, delta, alpha, upsilon):
 # GE Solver
 # =============================================================================
 
+@njit(cache=True)
+def get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, upsilon):
+    na, nz = len(a_h), len(z_h)
+    K, L, Y, En, A, Ext = 0., 0., 0., 0., 0., 0.
+    for ia in range(na):
+        a = a_h[ia]
+        for iz in range(nz):
+            wgt = dist[ia, iz]
+            A += a * wgt
+            p, ks, ld, out = solve_entrepreneur_single(a, z_h[iz], w, r, lam, delta, alpha, upsilon)
+            if p > w:
+                K += ks*wgt; L += ld*wgt; Y += out*wgt; En += wgt
+                Ext += max(0.0, ks - a)*wgt
+    return K, L, Y, En, A, Ext
+
 def find_equilibrium(params, method='analytical', fixed_shocks=None, w_init=1.5, r_init=0.045, coeffs_init=None):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     w, r = w_init, r_init
     coeffs = coeffs_init
+    dist = None
     w_step, r_step = 0.1, 0.03
     exc_L_p, exc_K_p = 0.0, 0.0
     na_h, nz_h = 600, 40
@@ -276,16 +320,11 @@ def find_equilibrium(params, method='analytical', fixed_shocks=None, w_init=1.5,
                 av, zv = simulation_step_parallel(av, zv, coeffs, rs[t], rws[t], ETA)
                 if t >= t_sim - 100:
                     ka, la, ya, ena, aaa, ea = get_aggregates_parallel(av, zv, w, r, lam, delta, alpha, upsilon)
-                    k_s+=ka; l_s+=la; y_s+=ya; en_s+=ena; aa_s+=aaa; e_s+=ea; ns += 1
+                    k_s+=ka; l_s+=la; ya_s+=ya; en_s+=ena; aa_s+=aaa; e_s+=ea; ns += 1
             K_agg, L_d, Y_agg, share_en, A_agg, extfin = [x/(n_a * ns) for x in [k_s, l_s, y_s, en_s, aa_s, e_s]]
         else:
-            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi)
-            K_agg, L_d, Y_agg, share_en, A_agg, extfin = 0., 0., 0., 0., 0., 0.
-            for ia in range(na_h):
-                for iz in range(nz_h):
-                    p, ks, ld, out = solve_entrepreneur_single(a_h[ia], z_h[iz], w, r, lam, delta, alpha, upsilon)
-                    wgt = dist[ia, iz]; A_agg += a_h[ia]*wgt
-                    if p > w: K_agg+=ks*wgt; L_d+=ld*wgt; Y_agg+=out*wgt; share_en+=wgt; extfin+=max(0., ks-a_h[ia])*wgt
+            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist.ravel() if dist is not None else None)
+            K_agg, L_d, Y_agg, share_en, A_agg, extfin = get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, upsilon)
         if K_agg < 1e-4:
             if method == 'simulation': av = np.full(n_a, 0.5)
             w *= 0.98; print(f"  [{it+1}] !!! COLLAPSE - w reset"); continue
@@ -346,27 +385,33 @@ if __name__ == "__main__":
         plot_data['r'].append(r['r'])
         plot_data['tfp'].append(curr_tfp)
 
-    # Plotting Figure 2 (1x2 style)
+    # Normalized Plotting (Relative to Perfect Credit)
     os.makedirs("plots", exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
-    # Left: GDP and TFP (Absolute Levels)
-    axes[0].plot(plot_data['ext_fin'], plot_data['gdp'], 'b-o', label='GDP', lw=2, markersize=8)
-    axes[0].plot(plot_data['ext_fin'], plot_data['tfp'], 'r--s', label='TFP', lw=2, markersize=8)
-    axes[0].set_xlabel('External Finance to GDP', fontsize=12)
-    axes[0].set_ylabel('Absolute Levels', fontsize=12)
-    axes[0].set_title('GDP and TFP vs Financial Development', fontsize=14)
-    axes[0].legend()
+    Y_perfect = plot_data['gdp'][0]
+    TFP_perfect = plot_data['tfp'][0]
+    Y_norm = [y / Y_perfect for y in plot_data['gdp']]
+    TFP_norm = [t / TFP_perfect for t in plot_data['tfp']]
+    
+    # Left: GDP and TFP (Relative)
+    axes[0].plot(plot_data['ext_fin'], Y_norm, 'b-o', label='GDP', lw=2, markersize=10)
+    axes[0].plot(plot_data['ext_fin'], TFP_norm, 'r--s', label='TFP', lw=2, markersize=10)
+    axes[0].set_xlabel('External Finance to GDP', fontsize=14)
+    axes[0].set_ylabel('Relative to Perfect Credit (λ=∞)', fontsize=14)
+    axes[0].set_title('GDP and TFP vs Financial Development', fontsize=16)
+    axes[0].legend(fontsize=12)
     axes[0].grid(True, alpha=0.3)
+    axes[0].set_ylim([0.35, 1.1])
     
     # Right: Interest Rate
-    axes[1].plot(plot_data['ext_fin'], plot_data['r'], 'g-^', lw=2, markersize=8)
-    axes[1].set_xlabel('External Finance to GDP', fontsize=12)
-    axes[1].set_ylabel('Interest Rate', fontsize=12)
-    axes[1].set_title('Equilibrium Interest Rate', fontsize=14)
+    axes[1].plot(plot_data['ext_fin'], plot_data['r'], 'g-^', lw=2, markersize=10)
+    axes[1].set_xlabel('External Finance to GDP', fontsize=14)
+    axes[1].set_ylabel('Interest Rate', fontsize=14)
+    axes[1].set_title('Equilibrium Interest Rate', fontsize=16)
     axes[1].grid(True, alpha=0.3)
     axes[1].axhline(y=0, color='k', linestyle='-', lw=0.5)
     
     plt.tight_layout()
-    plt.savefig("plots/figure2_replication_v5_chebyshev.png")
-    print(f"\n[SUCCESS] Figure 2 (Absolute Levels) saved to plots/figure2_replication_v5_chebyshev.png")
+    plt.savefig("plots/figure2_replication_v6.png")
+    print(f"\n[SUCCESS] Figure 2 saved to plots/figure2_replication_v6.png")
