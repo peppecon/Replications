@@ -57,8 +57,8 @@ Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0
 Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 10
-N_CHEBY_Z = 10
+N_CHEBY_A = 40
+N_CHEBY_Z = 40
 
 # =============================================================================
 # Bivariate Spectral Tools (from v6)
@@ -607,7 +607,7 @@ def find_equilibrium(params, distortions=False, w_init=0.30, r_init=-0.02,
 
         ws = 1.0 - share_en
         eL, eK = (L_d - ws)/max(ws, 0.05), (K_agg - A_agg)/max(A_agg, 1.0)
-        print(f"  [{it+1}] w={w:.4f}, r={r:.4f} | K={K_agg:.2f}, A={A_agg:.2f} | Ld={L_d:.2f}, Ls={ws:.2f}")
+        print(f"  [{it+1}] w={w:.6f}, r={r:.6f} | K={K_agg:.6f}, A={A_agg:.6f} | Ld={L_d:.6f}, Ls={ws:.6f}")
 
         if abs(eL) + abs(eK) < 2e-3:
             break
@@ -799,8 +799,8 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
     print(f"\n{'='*70}")
     print("TRANSITION PATH ITERATION")
     print(f"{'='*70}")
-    print(f"T = {T}, Initial: w_pre={w_pre:.4f}, r_pre={r_pre:.4f}")
-    print(f"Target: w_post={w_post:.4f}, r_post={r_post:.4f}")
+    print(f"T = {T}, Initial: w_pre={w_pre:.6f}, r_pre={r_pre:.6f}")
+    print(f"Target: w_post={w_post:.6f}, r_post={r_post:.6f}")
     print(f"{'='*70}\n")
 
     # Storage
@@ -873,8 +873,8 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
         max_ED = max(np.max(np.abs(ED_L_path)), np.max(np.abs(ED_K_path)))
 
         if tpi_iter % 5 == 0 or tpi_iter < 3:
-            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.5f}, "
-                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.5f}")
+            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.6f}, "
+                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.6f}")
 
         if max_ED < tol:
             print(f"\n[CONVERGED] after {tpi_iter+1} iterations")

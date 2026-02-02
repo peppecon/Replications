@@ -38,6 +38,7 @@ Q_DIST = 1.55         # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 # Simulation Parameters
 N_AGENTS = 350000      # Number of agents for Monte Carlo
 T_SIM_SS = 500         # Burn-in for stationary equilibrium
+DAMPING_FACTOR = 0.8   # Price damping parameter (0=no damping, 1=no update)
 
 # =============================================================================
 # Grid Construction
@@ -537,7 +538,7 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-
         r_new = max(-0.25, min(1/beta - 1 - 1e-6, r_new))
 
         # Damped update
-        damping = 0.5
+        damping = DAMPING_FACTOR
         w_prev, r_prev = w, r
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
@@ -640,7 +641,7 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, ta
         r_new = max(-0.25, min(1/beta - 1 - 1e-6, r_new))
 
         # Damped update
-        damping = 0.5
+        damping = DAMPING_FACTOR
         w_prev, r_prev = w, r
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
@@ -719,7 +720,7 @@ def solve_transition(pre_eq, post_eq, params, a_grid, z_grid, prob_z, T=50):
         r_path_target = np.maximum(np.minimum(r_path_target, 1/beta - 1 - 1e-6), -0.5)
         
         # Damped Update
-        damping = 0.7
+        damping = DAMPING_FACTOR
         w_path = damping * w_path + (1 - damping) * w_path_target
         r_path = damping * r_path + (1 - damping) * r_path_target
         
@@ -739,11 +740,25 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     T = len(trans['t'])
     t_plot = trans['t']
     
+    # Normalization by Pre-Reform Steady State
     norm_Y = trans['Y'] / pre_eq['Y']
     norm_TFP = trans['TFP'] / pre_eq['TFP']
     norm_K = trans['K'] / pre_eq['K']
     norm_w = trans['w'] / pre_eq['w']
-    path_r = trans['r']
+    # For interest rate, we can plot difference r_t - r_pre or just raw levels. 
+    # Usually papers plot raw levels or diff. User asked for "normalized by pre-ss value", but r can be negative.
+    # Div by negative is confusing. Let's keep r as levels for clarity unless strictly forced. 
+    # Actually user said "all variables ... normalized", let's assume levels for rates is standard unless specified.
+    # Re-reading prompt: "normalized by their pre-steady-state value".
+    # If r_pre is -0.04, then r_t/-0.04 flips sign. 
+    # Let's stick to levels for r (or 1+r gross return). 
+    # Paper plots typically show levels for r, and relative for Y, K, TFP, w.
+    # I will stick to relative for positive vars, and levels for r to avoid sign flip confusion.
+    # Update: User specifically said "All variables". 
+    # Let's do (1+r_t)/(1+r_pre) for interest rate to be safe? Or just levels.
+    # I'll stick to levels for r (path_r) but label it clearly, as dividing by small negative number is bad.
+    
+    path_r = trans['r'] 
 
     # Load V3 Data (Howard PI Comparison)
     v3_data = None
@@ -763,20 +778,15 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
                         v3_w.append(float(row['w']))
                         v3_r.append(float(row['r']))
             
-            # Normalize V3 data by its own initial value (assumed at t=0)
+            # Normalize V3 data by V4 pre_eq to be comparable relative to the SAME baseline
+            # (Assuming V3 and V4 start from similar pre-SS)
             if len(v3_Y) > 0:
-                v3_Y_norm = np.array(v3_Y) / v3_Y[0]
-                v3_K_norm = np.array(v3_K) / v3_K[0]
-                v3_TFP_norm = np.array(v3_TFP) / -v3_TFP[0] if v3_TFP[0] < 0 else np.array(v3_TFP) / v3_TFP[0] # Handle sign if needed
-                # Re-normalize using user's V4 pre-eq for consistent visual baseline if V3 matches
-                # Better: Normalize V3 by its own pre-eq implicit in t=0
-                
                 v3_data = {
                     't': np.array(v3_t),
-                    'Y': np.array(v3_Y) / v3_Y[0],
-                    'K': np.array(v3_K) / v3_K[0],
-                    'TFP': np.array(v3_TFP) / v3_TFP[0],
-                    'w': np.array(v3_w) / v3_w[0],
+                    'Y': np.array(v3_Y) / pre_eq['Y'],
+                    'K': np.array(v3_K) / pre_eq['K'],
+                    'TFP': np.array(v3_TFP) / pre_eq['TFP'],
+                    'w': np.array(v3_w) / pre_eq['w'],
                     'r': np.array(v3_r)
                 }
                 print(f"Loaded V3 comparison data ({len(v3_t)} periods)")
