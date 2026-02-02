@@ -473,7 +473,7 @@ def compute_stationary_with_dist(policy_plus_idx, policy_minus_idx,
 # Aggregate Computation
 # =============================================================================
 
-def compute_aggregates(dist, a_grid, z_grid, is_entrep_grid, kstar_grid, lstar_grid, output_grid):
+def compute_aggregates(dist, a_grid, z_grid, prob_z, is_entrep_grid, kstar_grid, lstar_grid, output_grid):
     """Compute aggregates (no distortions)"""
     K = np.sum(dist * kstar_grid * is_entrep_grid)
     L = np.sum(dist * lstar_grid * is_entrep_grid)
@@ -504,7 +504,7 @@ def compute_aggregates(dist, a_grid, z_grid, is_entrep_grid, kstar_grid, lstar_g
             'share_entre': share_entre, 'avg_z_entrep': avg_z_entrep,
             'wealth_top5_share': wealth_top5_share}
 
-def compute_aggregates_with_dist(mu_plus, mu_minus, a_grid, z_grid,
+def compute_aggregates_with_dist(mu_plus, mu_minus, a_grid, z_grid, prob_z,
                                   is_plus, k_plus, l_plus, out_plus,
                                   is_minus, k_minus, l_minus, out_minus):
     """Compute aggregates WITH distortions"""
@@ -557,6 +557,9 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
     best_error = np.inf
     best_result = None
 
+    exc_L_history = []
+    exc_K_history = []
+
     for iteration in range(max_iter):
         (profit_grid, kstar_grid, lstar_grid, output_grid,
          is_entrep_grid, income_grid) = precompute_entrepreneur_all(
@@ -573,7 +576,7 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
         )
 
         agg = compute_aggregates(
-            dist, a_grid, z_grid, is_entrep_grid,
+            dist, a_grid, z_grid, prob_z, is_entrep_grid,
             kstar_grid, lstar_grid, output_grid
         )
 
@@ -630,10 +633,14 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
         'TFP': TFP, 'extfin': agg['extfin'],
         'ExtFin_Y': agg['extfin'] / max(agg['Y'], 1e-8),
         'share_entre': agg['share_entre'],
+        'avg_z_entrep': agg['avg_z_entrep'],
+        'wealth_top5_share': agg['wealth_top5_share'],
         'dist': best_result['dist'],
         'policy': best_result['policy'],
         'V': best_result['V'],
         'a_grid': a_grid, 'z_grid': z_grid, 'prob_z': prob_z,
+        'exc_L_history': np.array(exc_L_history),
+        'exc_K_history': np.array(exc_K_history),
     }
 
 # =============================================================================
@@ -655,6 +662,9 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
 
     best_error = np.inf
     best_result = None
+
+    exc_L_history = []
+    exc_K_history = []
 
     for iteration in range(max_iter):
         # Precompute for both tau states
@@ -680,7 +690,7 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
 
         # Aggregates
         agg = compute_aggregates_with_dist(
-            mu_plus, mu_minus, a_grid, z_grid,
+            mu_plus, mu_minus, a_grid, z_grid, prob_z,
             is_plus, k_plus, l_plus, out_plus,
             is_minus, k_minus, l_minus, out_minus
         )
@@ -735,6 +745,8 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
         'TFP': TFP, 'extfin': agg['extfin'],
         'ExtFin_Y': agg['extfin'] / max(agg['Y'], 1e-8),
         'share_entre': agg['share_entre'],
+        'avg_z_entrep': agg['avg_z_entrep'],
+        'wealth_top5_share': agg['wealth_top5_share'],
         'mu_plus': best_result['mu_plus'],
         'mu_minus': best_result['mu_minus'],
         'policy_plus': best_result['policy_plus'],
@@ -743,6 +755,8 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
         'V_minus': best_result['V_minus'],
         'a_grid': a_grid, 'z_grid': z_grid, 'prob_z': prob_z,
         'prob_tau_plus': prob_tau_plus,
+        'exc_L_history': np.array(exc_L_history),
+        'exc_K_history': np.array(exc_K_history),
     }
 
 # =============================================================================
@@ -925,7 +939,7 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
 
         for t in range(T):
             agg = compute_aggregates(
-                dist_t, a_grid, z_grid, is_entrep_list[t],
+                dist_t, a_grid, z_grid, prob_z, is_entrep_list[t],
                 kstar_list[t], lstar_list[t], output_list[t]
             )
 
@@ -1031,6 +1045,25 @@ def save_results(pre_eq, post_eq, trans, output_dir='outputs'):
 
 def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Premium Styling Parameters
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'legend.fontsize': 10,
+        'figure.titlesize': 16,
+        'grid.alpha': 0.3,
+        'lines.linewidth': 2.5
+    })
+    
+    # Use a cleaner color palette
+    c_blue = '#004488'
+    c_red = '#BB5566'
+    c_green = '#228833'
+    c_grey = '#888888'
 
     # Padding settings: -4 to 20
     T_limit = 20
@@ -1108,7 +1141,7 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     axes[1,2].set_title('Capital Stock'); axes[1,2].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'transition_aggregates_v3.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'transition_aggregates_v3.png'), dpi=300)
     plt.close()
 
     # -------------------------------------------------------------------------
@@ -1133,10 +1166,44 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     axes[1].set_title('Wealth Share of Top 5% Ability'); axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'transition_micro_v3.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'transition_micro_v3.png'), dpi=300)
     plt.close()
 
     print(f"Plots saved to {output_dir}/")
+
+def plot_convergence_diagnostics(pre_eq, post_eq, output_dir='outputs'):
+    """Plot convergence history for pre and post stationary equilibria"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Pre-reform and Post-reform converge diagnostics
+    # Note: trans doesn't have TPI history yet, but we have pre/post
+    
+    if 'exc_L_history' in pre_eq:
+        iters = np.arange(1, len(pre_eq['exc_L_history']) + 1)
+        axes[0].plot(iters, pre_eq['exc_L_history'], 'b-', label='Exc. Labor (Pre)')
+        axes[0].plot(iters, pre_eq['exc_K_history'], 'r-', label='Exc. Capital (Pre)')
+    
+    if 'exc_L_history' in post_eq:
+        iters = np.arange(1, len(post_eq['exc_L_history']) + 1)
+        axes[1].plot(iters, post_eq['exc_L_history'], 'b--', label='Exc. Labor (Post)')
+        axes[1].plot(iters, post_eq['exc_K_history'], 'r--', label='Exc. Capital (Post)')
+        
+    for ax in axes:
+        ax.axhline(0, color='black', lw=1)
+        ax.set_yscale('symlog', linthresh=1e-3)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Excess Demand')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+    axes[0].set_title('Convergence: Pre-reform Baseline')
+    axes[1].set_title('Convergence: Post-reform Steady State')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'convergence_diagnostics_v3.png'), dpi=200)
+    plt.close()
 
 def print_summary(pre_eq, post_eq, trans):
     print("\n" + "="*70)
@@ -1220,6 +1287,7 @@ def main():
     # Save and plot
     save_results(pre_eq, post_eq, trans, args.output_dir)
     plot_transition(pre_eq, post_eq, trans, args.output_dir)
+    plot_convergence_diagnostics(pre_eq, post_eq, args.output_dir)
     print_summary(pre_eq, post_eq, trans)
 
     return pre_eq, post_eq, trans
