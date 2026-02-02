@@ -486,7 +486,23 @@ def compute_aggregates(dist, a_grid, z_grid, is_entrep_grid, kstar_grid, lstar_g
     A = np.sum(dist * a_broadcast)
     share_entre = np.sum(dist * is_entrep_grid)
 
-    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 'share_entre': share_entre}
+    # Paper Figures: Distributional Stats
+    # 1. Average ability among active entrepreneurs
+    mass_entre = dist * is_entrep_grid
+    if mass_entre.sum() > 1e-12:
+        avg_z_entrep = np.sum(mass_entre * z_grid) / mass_entre.sum()
+    else:
+        avg_z_entrep = 0.0
+
+    # 2. Wealth share of top 5% ability agents
+    wealth_by_z = np.sum(dist * a_broadcast, axis=0)
+    prob_z_cum = np.cumsum(prob_z)
+    z_top5_idx = np.where(prob_z_cum >= 0.95)[0]
+    wealth_top5_share = np.sum(wealth_by_z[z_top5_idx]) / max(A, 1e-8)
+    
+    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 
+            'share_entre': share_entre, 'avg_z_entrep': avg_z_entrep,
+            'wealth_top5_share': wealth_top5_share}
 
 def compute_aggregates_with_dist(mu_plus, mu_minus, a_grid, z_grid,
                                   is_plus, k_plus, l_plus, out_plus,
@@ -505,7 +521,23 @@ def compute_aggregates_with_dist(mu_plus, mu_minus, a_grid, z_grid,
     A = np.sum(mu_plus * a_broadcast) + np.sum(mu_minus * a_broadcast)
     share_entre = np.sum(mu_plus * is_plus) + np.sum(mu_minus * is_minus)
 
-    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 'share_entre': share_entre}
+    # Paper Figures: Distributional Stats
+    # 1. Average ability among active entrepreneurs
+    mass_entre = mu_plus * is_plus + mu_minus * is_minus
+    if mass_entre.sum() > 1e-12:
+        avg_z_entrep = np.sum(mass_entre * z_grid) / mass_entre.sum()
+    else:
+        avg_z_entrep = 0.0
+
+    # 2. Wealth share of top 5% ability agents
+    wealth_by_z = np.sum((mu_plus + mu_minus) * a_broadcast, axis=0)
+    prob_z_cum = np.cumsum(prob_z)
+    z_top5_idx = np.where(prob_z_cum >= 0.95)[0]
+    wealth_top5_share = np.sum(wealth_by_z[z_top5_idx]) / max(A, 1e-8)
+
+    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 
+            'share_entre': share_entre, 'avg_z_entrep': avg_z_entrep,
+            'wealth_top5_share': wealth_top5_share}
 
 # =============================================================================
 # GE Solver - No Distortions
@@ -838,6 +870,9 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
     TFP_path = np.zeros(T)
     ExtFin_path = np.zeros(T)
     Entre_path = np.zeros(T)
+    AvgZ_path = np.zeros(T)
+    WealthTop5_path = np.zeros(T)
+    I_path = np.zeros(T)
     ED_L_path = np.zeros(T)
     ED_K_path = np.zeros(T)
 
@@ -900,6 +935,8 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
             A_path[t] = agg['A']
             ExtFin_path[t] = agg['extfin']
             Entre_path[t] = agg['share_entre']
+            AvgZ_path[t] = agg['avg_z_entrep']
+            WealthTop5_path[t] = agg['wealth_top5_share']
 
             span = 1 - upsilon
             L_s = 1 - agg['share_entre']
@@ -910,6 +947,15 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
 
             if t < T - 1:
                 dist_t = update_distribution_forward(dist_t, policies[t], a_grid, z_grid, prob_z, psi)
+
+        # =================================================================
+        # COMPUTE INVESTMENT RATE
+        # =================================================================
+        I_val = np.zeros(T)
+        for t in range(T-1):
+            I_val[t] = K_path[t+1] - (1 - delta) * K_path[t]
+        I_val[T-1] = post_eq['K'] - (1 - delta) * K_path[T-1]
+        I_Y_path = I_val / np.maximum(Y_path, 1e-8)
 
         # =================================================================
         # CHECK CONVERGENCE
@@ -952,6 +998,9 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
         'TFP': TFP_path, 'ExtFin': ExtFin_path,
         'ExtFin_Y': ExtFin_path / np.maximum(Y_path, 1e-8),
         'Entre_share': Entre_path,
+        'AvgZ': AvgZ_path,
+        'WealthTop5': WealthTop5_path,
+        'I_Y': I_Y_path,
         'ED_L': ED_L_path, 'ED_K': ED_K_path,
     }
 
@@ -971,11 +1020,12 @@ def save_results(pre_eq, post_eq, trans, output_dir='outputs'):
     import csv
     with open(os.path.join(output_dir, 'transition_v3.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['t', 'w', 'r', 'Y', 'K', 'L', 'A', 'TFP', 'ext_fin', 'ext_fin_Y', 'entrepreneur_share'])
+        writer.writerow(['t', 'w', 'r', 'Y', 'K', 'L', 'A', 'TFP', 'ext_fin_Y', 'entrepreneur_share', 'avg_z_entrep', 'wealth_top5_share', 'I_Y'])
         for i in range(len(trans['t'])):
             writer.writerow([trans['t'][i], trans['w'][i], trans['r'][i], trans['Y'][i],
                            trans['K'][i], trans['L'][i], trans['A'][i], trans['TFP'][i],
-                           trans['ExtFin'][i], trans['ExtFin_Y'][i], trans['Entre_share'][i]])
+                           trans['ExtFin_Y'][i], trans['Entre_share'][i],
+                           trans['AvgZ'][i], trans['WealthTop5'][i], trans['I_Y'][i]])
 
     print(f"\nResults saved to {output_dir}/")
 
@@ -983,50 +1033,84 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     os.makedirs(output_dir, exist_ok=True)
 
     t = trans['t']
-    Y_post, TFP_post = post_eq['Y'], post_eq['TFP']
+    Y_pre, K_pre, TFP_pre = pre_eq['Y'], pre_eq['K'], pre_eq['TFP']
+    I_Y_pre = (DELTA * K_pre) / max(Y_pre, 1e-8)
 
+    # -------------------------------------------------------------------------
+    # Figure 1: Aggregate Dynamics (Paper Figs 3 & 4 style)
+    # -------------------------------------------------------------------------
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
-    axes[0,0].plot(t, trans['Y']/Y_post, 'b-', lw=2)
-    axes[0,0].axhline(1.0, color='r', ls='--', alpha=0.7)
-    axes[0,0].axhline(pre_eq['Y']/Y_post, color='g', ls=':', alpha=0.7)
-    axes[0,0].set_xlabel('Period'); axes[0,0].set_ylabel('Y / Y_post')
-    axes[0,0].set_title('Output'); axes[0,0].grid(True, alpha=0.3)
+    # Output (Normalized by Pre)
+    axes[0,0].plot(t, trans['Y']/Y_pre, 'b-', lw=2, label=f'λ={LAMBDA}')
+    axes[0,0].axhline(post_eq['Y']/Y_pre, color='r', ls='--', alpha=0.7, label='Post SS')
+    axes[0,0].axhline(1.0, color='g', ls=':', alpha=0.7, label='Pre SS')
+    axes[0,0].set_xlabel('Period'); axes[0,0].set_ylabel('Y / Y_pre')
+    axes[0,0].set_title('Output (GDP)'); axes[0,0].grid(True, alpha=0.3); axes[0,0].legend()
 
-    axes[0,1].plot(t, trans['TFP']/TFP_post, 'b-', lw=2)
-    axes[0,1].axhline(1.0, color='r', ls='--', alpha=0.7)
-    axes[0,1].axhline(pre_eq['TFP']/TFP_post, color='g', ls=':', alpha=0.7)
-    axes[0,1].set_xlabel('Period'); axes[0,1].set_ylabel('TFP / TFP_post')
-    axes[0,1].set_title('TFP'); axes[0,1].grid(True, alpha=0.3)
+    # TFP (Normalized by Pre)
+    axes[0,1].plot(t, trans['TFP']/TFP_pre, 'b-', lw=2)
+    axes[0,1].axhline(post_eq['TFP']/TFP_pre, color='r', ls='--')
+    axes[0,1].axhline(1.0, color='g', ls=':')
+    axes[0,1].set_xlabel('Period'); axes[0,1].set_ylabel('TFP / TFP_pre')
+    axes[0,1].set_title('TFP Measure'); axes[0,1].grid(True, alpha=0.3)
 
+    # Interest Rate
     axes[0,2].plot(t, trans['r'], 'b-', lw=2)
-    axes[0,2].axhline(post_eq['r'], color='r', ls='--', alpha=0.7)
-    axes[0,2].axhline(pre_eq['r'], color='g', ls=':', alpha=0.7)
+    axes[0,2].axhline(post_eq['r'], color='r', ls='--')
+    axes[0,2].axhline(pre_eq['r'], color='g', ls=':')
     axes[0,2].set_xlabel('Period'); axes[0,2].set_ylabel('r')
     axes[0,2].set_title('Interest Rate'); axes[0,2].grid(True, alpha=0.3)
 
-    axes[1,0].plot(t, trans['w'], 'b-', lw=2)
-    axes[1,0].axhline(post_eq['w'], color='r', ls='--', alpha=0.7)
-    axes[1,0].axhline(pre_eq['w'], color='g', ls=':', alpha=0.7)
-    axes[1,0].set_xlabel('Period'); axes[1,0].set_ylabel('w')
-    axes[1,0].set_title('Wage'); axes[1,0].grid(True, alpha=0.3)
+    # Wage (Normalized by Pre)
+    axes[1,0].plot(t, trans['w']/pre_eq['w'], 'b-', lw=2)
+    axes[1,0].axhline(post_eq['w']/pre_eq['w'], color='r', ls='--')
+    axes[1,0].axhline(1.0, color='g', ls=':')
+    axes[1,0].set_xlabel('Period'); axes[1,0].set_ylabel('w / w_pre')
+    axes[1,0].set_title('Real Wage'); axes[1,0].grid(True, alpha=0.3)
 
-    axes[1,1].plot(t, trans['ExtFin_Y'], 'b-', lw=2)
-    axes[1,1].axhline(post_eq['ExtFin_Y'], color='r', ls='--', alpha=0.7)
-    axes[1,1].axhline(pre_eq['ExtFin_Y'], color='g', ls=':', alpha=0.7)
-    axes[1,1].set_xlabel('Period'); axes[1,1].set_ylabel('ExtFin/Y')
-    axes[1,1].set_title('External Finance'); axes[1,1].grid(True, alpha=0.3)
+    # Investment Rate (Deviation from Pre)
+    axes[1,1].plot(t, trans['I_Y'] - I_Y_pre, 'b-', lw=2)
+    axes[1,1].axhline(0.0, color='g', ls=':')
+    axes[1,1].axhline((post_eq['K']*DELTA/post_eq['Y']) - I_Y_pre, color='r', ls='--')
+    axes[1,1].set_xlabel('Period'); axes[1,1].set_ylabel('i - i_pre')
+    axes[1,1].set_title('Investment Rate Deviation'); axes[1,1].grid(True, alpha=0.3)
 
-    axes[1,2].plot(t, trans['Entre_share'], 'b-', lw=2)
-    axes[1,2].axhline(post_eq['share_entre'], color='r', ls='--', alpha=0.7)
-    axes[1,2].axhline(pre_eq['share_entre'], color='g', ls=':', alpha=0.7)
-    axes[1,2].set_xlabel('Period'); axes[1,2].set_ylabel('Share')
-    axes[1,2].set_title('Entrepreneur Share'); axes[1,2].grid(True, alpha=0.3)
+    # Capital Stock (Normalized by Pre)
+    axes[1,2].plot(t, trans['K']/K_pre, 'b-', lw=2)
+    axes[1,2].axhline(post_eq['K']/K_pre, color='r', ls='--')
+    axes[1,2].axhline(1.0, color='g', ls=':')
+    axes[1,2].set_xlabel('Period'); axes[1,2].set_ylabel('K / K_pre')
+    axes[1,2].set_title('Capital Stock'); axes[1,2].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'transition_dynamics_v3.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'transition_aggregates_v3.png'), dpi=150)
     plt.close()
-    print(f"Plots saved to {output_dir}/transition_dynamics_v3.png")
+
+    # -------------------------------------------------------------------------
+    # Figure 2: Micro-Implications (Paper Fig 5 style)
+    # -------------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Average Entrepreneurial Ability (Normalized by Pre)
+    axes[0].plot(t, trans['AvgZ']/pre_eq['avg_z_entrep'], 'b-', lw=2)
+    axes[0].axhline(post_eq['avg_z_entrep']/pre_eq['avg_z_entrep'], color='r', ls='--')
+    axes[0].axhline(1.0, color='g', ls=':')
+    axes[0].set_xlabel('Period'); axes[0].set_ylabel('Ability / Ability_pre')
+    axes[0].set_title('Avg. Entrep. Ability'); axes[0].grid(True, alpha=0.3)
+
+    # Wealth share of top 5% ability
+    axes[1].plot(t, trans['WealthTop5'], 'b-', lw=2)
+    axes[1].axhline(post_eq['wealth_top5_share'], color='r', ls='--')
+    axes[1].axhline(pre_eq['wealth_top5_share'], color='g', ls=':')
+    axes[1].set_xlabel('Period'); axes[1].set_ylabel('Share')
+    axes[1].set_title('Wealth Share of Top 5% Ability'); axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'transition_micro_v3.png'), dpi=150)
+    plt.close()
+
+    print(f"Plots saved to {output_dir}/")
 
 def print_summary(pre_eq, post_eq, trans):
     print("\n" + "="*70)
@@ -1037,7 +1121,8 @@ def print_summary(pre_eq, post_eq, trans):
 
     for name, key in [('Output (Y)', 'Y'), ('TFP', 'TFP'), ('Capital (K)', 'K'),
                       ('Assets (A)', 'A'), ('Wage (w)', 'w'), ('Interest Rate (r)', 'r'),
-                      ('Ext.Fin/GDP', 'ExtFin_Y'), ('Entre Share', 'share_entre')]:
+                      ('Share Entre', 'share_entre'), ('Avg. Ability', 'avg_z_entrep'),
+                      ('Top 5% Wealth', 'wealth_top5_share')]:
         pre_v, post_v = pre_eq[key], post_eq[key]
         chg = (post_v - pre_v) / abs(pre_v) * 100 if pre_v != 0 else 0
         print(f"{name:<20} {pre_v:>15.4f} {post_v:>15.4f} {chg:>11.2f}%")
