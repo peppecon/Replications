@@ -339,6 +339,140 @@ def solve_value_function_fast(a_grid, z_grid, prob_z, income_grid,
     return V, policy_a_idx
 
 # =============================================================================
+# Coupled VFI (For Pre-Reform Distortions)
+# =============================================================================
+
+@njit(cache=True, parallel=True)
+def coupled_bellman_operator(V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus,
+                              inc_p, inc_m, beta, sigma, psi):
+    """
+    Bellman operator for coupled tau states.
+    V_p = value function for tau_plus state
+    V_m = value function for tau_minus state
+    """
+    n_a, n_z = len(a_grid), len(z_grid)
+    V_p_new = np.zeros((n_a, n_z))
+    V_m_new = np.zeros((n_a, n_z))
+    pol_p_idx = np.zeros((n_a, n_z), dtype=np.int64)
+    pol_m_idx = np.zeros((n_a, n_z), dtype=np.int64)
+
+    # Joint expected value across tau states (unconditional over z' and tau')
+    EV_unconditional = np.zeros(n_a)
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            EV_unconditional[i_a] += prob_z[i_z] * (
+                prob_tau_plus[i_z] * V_p[i_a, i_z] +
+                (1 - prob_tau_plus[i_z]) * V_m[i_a, i_z]
+            )
+
+    for i_z in prange(n_z):
+        # EV for staying at current z (persistence) vs redrawing
+        EV_row_p = psi * V_p[:, i_z] + (1 - psi) * EV_unconditional
+        EV_row_m = psi * V_m[:, i_z] + (1 - psi) * EV_unconditional
+
+        start_p, start_m = 0, 0
+
+        for i_a in range(n_a):
+            # tau_plus state
+            best_val_p, best_idx_p = find_optimal_savings_monotone(
+                inc_p[i_a, i_z], a_grid, EV_row_p, beta, sigma, start_p
+            )
+            V_p_new[i_a, i_z] = best_val_p
+            pol_p_idx[i_a, i_z] = best_idx_p
+            start_p = best_idx_p
+
+            # tau_minus state
+            best_val_m, best_idx_m = find_optimal_savings_monotone(
+                inc_m[i_a, i_z], a_grid, EV_row_m, beta, sigma, start_m
+            )
+            V_m_new[i_a, i_z] = best_val_m
+            pol_m_idx[i_a, i_z] = best_idx_m
+            start_m = best_idx_m
+
+    return V_p_new, V_m_new, pol_p_idx, pol_m_idx
+
+
+@njit(cache=True, parallel=True)
+def coupled_howard_acceleration(V_p, V_m, pol_p_idx, pol_m_idx, a_grid, z_grid,
+                                 prob_z, prob_tau_plus, inc_p, inc_m,
+                                 beta, sigma, psi, n_howard=15):
+    """Howard acceleration for coupled tau states"""
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    for _ in range(n_howard):
+        # Recompute unconditional expected value
+        EV_unconditional = np.zeros(n_a)
+        for i_a in range(n_a):
+            for i_z in range(n_z):
+                EV_unconditional[i_a] += prob_z[i_z] * (
+                    prob_tau_plus[i_z] * V_p[i_a, i_z] +
+                    (1 - prob_tau_plus[i_z]) * V_m[i_a, i_z]
+                )
+
+        V_p_new = np.zeros((n_a, n_z))
+        V_m_new = np.zeros((n_a, n_z))
+
+        for i_z in prange(n_z):
+            for i_a in range(n_a):
+                # tau_plus update
+                idx_p = pol_p_idx[i_a, i_z]
+                c_p = inc_p[i_a, i_z] - a_grid[idx_p]
+                EV_p = psi * V_p[idx_p, i_z] + (1 - psi) * EV_unconditional[idx_p]
+                V_p_new[i_a, i_z] = utility(c_p, sigma) + beta * EV_p
+
+                # tau_minus update
+                idx_m = pol_m_idx[i_a, i_z]
+                c_m = inc_m[i_a, i_z] - a_grid[idx_m]
+                EV_m = psi * V_m[idx_m, i_z] + (1 - psi) * EV_unconditional[idx_m]
+                V_m_new[i_a, i_z] = utility(c_m, sigma) + beta * EV_m
+
+        V_p = V_p_new
+        V_m = V_m_new
+
+    return V_p, V_m
+
+
+def solve_value_function_coupled(a_grid, z_grid, prob_z, prob_tau_plus,
+                                  inc_p, inc_m, beta, sigma, psi,
+                                  V_p_init=None, V_m_init=None,
+                                  tol=1e-5, max_iter=500, n_howard=15):
+    """Coupled VFI for distortion case"""
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    if V_p_init is not None:
+        V_p = V_p_init.copy()
+        V_m = V_m_init.copy()
+    else:
+        V_p = np.zeros((n_a, n_z))
+        V_m = np.zeros((n_a, n_z))
+        for i_a in range(n_a):
+            c_p = max(inc_p[i_a, 0] - a_grid[0], 0.01)
+            c_m = max(inc_m[i_a, 0] - a_grid[0], 0.01)
+            V_p[i_a, :] = utility(c_p, sigma) / (1 - beta)
+            V_m[i_a, :] = utility(c_m, sigma) / (1 - beta)
+
+    for iteration in range(max_iter):
+        V_p_new, V_m_new, pol_p, pol_m = coupled_bellman_operator(
+            V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus,
+            inc_p, inc_m, beta, sigma, psi
+        )
+
+        diff = max(np.max(np.abs(V_p_new - V_p)), np.max(np.abs(V_m_new - V_m)))
+
+        if diff < tol:
+            return V_p_new, V_m_new, pol_p, pol_m
+
+        if n_howard > 0 and diff > tol * 10:
+            V_p, V_m = coupled_howard_acceleration(
+                V_p_new, V_m_new, pol_p, pol_m, a_grid, z_grid,
+                prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi, n_howard
+            )
+        else:
+            V_p, V_m = V_p_new, V_m_new
+
+    return V_p, V_m, pol_p, pol_m
+
+# =============================================================================
 # Stationary Distribution (from v3)
 # =============================================================================
 
@@ -582,12 +716,10 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
 
         exc_K = agg['K'] - agg['A']
         exc_L = agg['L'] - (1 - agg['share_entre'])
-
-        if verbose:
-            print(f"  [{iteration+1}] w={w:.4f}, r={r:.4f} | K={agg['K']:.2f}, A={agg['A']:.2f} | "
-                  f"Ld={agg['L']:.2f}, Ls={1-agg['share_entre']:.2f}")
-
         total_error = abs(exc_L) + abs(exc_K)
+        if verbose:
+            print(f"  [{iteration+1:3d}] w={w:.8f}, r={r:.8f} | K={agg['K']:.6f}, A={agg['A']:.6f} | "
+                  f"Ld={agg['L']:.6f}, Ls={1-agg['share_entre']:.6f} | err={total_error:.8f}")
 
         if total_error < best_error:
             best_error = total_error
@@ -675,12 +807,11 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
             a_grid, z_grid, tau_minus, w, r, lam, delta, alpha, upsilon
         )
 
-        # Solve VFI for both tau states
-        V_plus, policy_plus = solve_value_function_fast(
-            a_grid, z_grid, prob_z, inc_plus, beta, sigma, psi, V_init=V_plus
-        )
-        V_minus, policy_minus = solve_value_function_fast(
-            a_grid, z_grid, prob_z, inc_minus, beta, sigma, psi, V_init=V_minus
+        # Solve COUPLED VFI for both tau states
+        V_plus, V_minus, policy_plus, policy_minus = solve_value_function_coupled(
+            a_grid, z_grid, prob_z, prob_tau_plus,
+            inc_plus, inc_minus, beta, sigma, psi,
+            V_p_init=V_plus, V_m_init=V_minus
         )
 
         # Compute distribution
@@ -697,12 +828,10 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
 
         exc_K = agg['K'] - agg['A']
         exc_L = agg['L'] - (1 - agg['share_entre'])
-
-        if verbose:
-            print(f"  [{iteration+1}] w={w:.4f}, r={r:.4f} | K={agg['K']:.2f}, A={agg['A']:.2f} | "
-                  f"Ld={agg['L']:.2f}, Ls={1-agg['share_entre']:.2f}")
-
         total_error = abs(exc_L) + abs(exc_K)
+        if verbose:
+            print(f"  [{iteration+1:3d}] w={w:.8f}, r={r:.8f} | K={agg['K']:.6f}, A={agg['A']:.2f} | "
+                  f"Ld={agg['L']:.6f}, Ls={1-agg['share_entre']:.2f} | err={total_error:.8f}")
 
         if total_error < best_error:
             best_error = total_error
@@ -977,8 +1106,8 @@ def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
         max_ED = max(np.max(np.abs(ED_L_path)), np.max(np.abs(ED_K_path)))
 
         if tpi_iter % 5 == 0 or tpi_iter < 3:
-            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.5f}, "
-                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.5f}")
+            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.8f}, "
+                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.8f}, total_err={max_ED:.8f}")
 
         if max_ED < tol:
             print(f"\n[CONVERGED] after {tpi_iter+1} iterations")

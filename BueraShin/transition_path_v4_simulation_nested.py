@@ -74,7 +74,7 @@ def compute_tau_probs(z_grid, q):
 # Entrepreneur Problem (Numba Accelerated)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
     """Static profit maximization for a single state"""
     rental = max(r + delta, 1e-8)
@@ -94,7 +94,7 @@ def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
     profit = output - wage * lstar - rental * kstar
     return profit, kstar, lstar, output
 
-@njit(cache=False)
+@njit(cache=True)
 def solve_entrepreneur_with_tau(a, z, tau, w, r, lam, delta, alpha, upsilon):
     """Static profit maximization WITH distortion tau.
 
@@ -126,7 +126,7 @@ def solve_entrepreneur_with_tau(a, z, tau, w, r, lam, delta, alpha, upsilon):
     profit = output - wage * lstar - rental * kstar
     return profit, kstar, lstar, output
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon):
     """Vectorized precomputation for VFI"""
     n_a, n_z = len(a_grid), len(z_grid)
@@ -153,7 +153,7 @@ def precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon
                 income_g[i_a, i_z] = w + (1 + r) * a_grid[i_a]
     return profit_g, kstar_g, lstar_g, output_g, is_entrep_g, income_g
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def precompute_entrepreneur_with_tau(a_grid, z_grid, tau, w, r, lam, delta, alpha, upsilon):
     """Vectorized precomputation WITH distortion"""
     n_a, n_z = len(a_grid), len(z_grid)
@@ -184,13 +184,13 @@ def precompute_entrepreneur_with_tau(a_grid, z_grid, tau, w, r, lam, delta, alph
 # Value Function Iteration (Optimized from V3)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def utility(c, sigma):
     if c <= 1e-10: return -1e10
     if abs(sigma - 1.0) < 1e-6: return np.log(c)
     return (c**(1-sigma) - 1) / (1-sigma)
 
-@njit(cache=False)
+@njit(cache=True)
 def find_optimal_savings(income, a_grid, EV_row, beta, sigma, start_idx):
     n_a = len(a_grid)
     best_val = -1e15
@@ -203,7 +203,7 @@ def find_optimal_savings(income, a_grid, EV_row, beta, sigma, start_idx):
             best_val, best_idx = val, i_a_prime
     return best_val, best_idx
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def bellman_operator(V, a_grid, z_grid, prob_z, income_grid, beta, sigma, psi):
     n_a, n_z = len(a_grid), len(z_grid)
     V_new = np.zeros((n_a, n_z))
@@ -225,7 +225,7 @@ def bellman_operator(V, a_grid, z_grid, prob_z, income_grid, beta, sigma, psi):
             start_idx = idx
     return V_new, policy_a_idx
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def howard_acceleration(V, policy_a_idx, a_grid, z_grid, prob_z, income_grid, beta, sigma, psi, n_howard=15):
     n_a, n_z = len(a_grid), len(z_grid)
     for _ in range(n_howard):
@@ -284,7 +284,7 @@ def solve_value_function_coupled(a_grid, z_grid, prob_z, prob_tau_plus, inc_p, i
 # Coupled VFI (For Pre-Reform Distortions)
 # =============================================================================
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def coupled_bellman_operator(V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi):
     n_a, n_z = len(a_grid), len(z_grid)
     V_p_new, V_m_new = np.zeros((n_a, n_z)), np.zeros((n_a, n_z))
@@ -312,7 +312,7 @@ def coupled_bellman_operator(V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus, in
             
     return V_p_new, V_m_new, pol_p_idx, pol_m_idx
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def coupled_howard_acceleration(V_p, V_m, pol_p_idx, pol_m_idx, a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi, n_howard=15):
     n_a, n_z = len(a_grid), len(z_grid)
     for _ in range(n_howard):
@@ -335,7 +335,7 @@ def coupled_howard_acceleration(V_p, V_m, pol_p_idx, pol_m_idx, a_grid, z_grid, 
 # Simulation Routines (Simplified from V4)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def get_interp_weights(x, x_grid):
     n = len(x_grid)
     if x <= x_grid[0]: return 0, 0, 1.0
@@ -347,7 +347,7 @@ def get_interp_weights(x, x_grid):
         else: low = mid
     return low, high, (x_grid[high] - x)/(x_grid[high] - x_grid[low])
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def simulate_step(a_curr, z_idx_curr, policy_a_vals, a_grid, reset_shocks, ability_shocks):
     n = len(a_curr)
     a_next = np.zeros(n)
@@ -358,7 +358,7 @@ def simulate_step(a_curr, z_idx_curr, policy_a_vals, a_grid, reset_shocks, abili
         a_next[i] = w_l * policy_a_vals[i_l, z_idx_curr[i]] + (1-w_l) * policy_a_vals[i_h, z_idx_curr[i]]
     return a_next, z_idx_next
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def simulate_step_coupled(a_curr, z_idx_curr, tau_curr, pol_p_vals, pol_m_vals, a_grid, resets, shocks, tau_shocks, tau_p, tau_m):
     n = len(a_curr)
     a_next = np.zeros(n)
@@ -379,7 +379,7 @@ def simulate_step_coupled(a_curr, z_idx_curr, tau_curr, pol_p_vals, pol_m_vals, 
             a_next[i] = w_l * pol_m_vals[i_l, z_idx_curr[i]] + (1-w_l) * pol_m_vals[i_h, z_idx_curr[i]]
     return a_next, z_idx_next, tau_next
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def compute_sim_aggregates(a_sim, z_idx_sim, z_grid, w, r, lam, delta, alpha, upsilon, tau=0.0):
     n = len(a_sim)
     K, L, Y, A, extfin, s_e = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -398,35 +398,6 @@ def compute_sim_aggregates(a_sim, z_idx_sim, z_grid, w, r, lam, delta, alpha, up
             s_e += 1.0
     return K/n, L/n, Y/n, A/n, extfin/n, s_e/n
 
-def compute_sim_aggregates_extended(a_sim, z_idx_sim, z_grid, w, r, lam, delta, alpha, upsilon, tau=0.0):
-    """Compute aggregates plus avg entrepreneur z and wealth concentration."""
-    n = len(a_sim)
-    K, L, Y, A, extfin, s_e = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    sum_z_entrep = 0.0
-    wage = max(w, 1e-8)
-
-    for i in range(n):
-        a = a_sim[i]
-        z = z_grid[z_idx_sim[i]]
-        A += a
-        p, k, l, o = solve_entrepreneur_with_tau(a, z, tau, w, r, lam, delta, alpha, upsilon)
-        if p > wage:
-            K += k
-            L += l
-            Y += o
-            extfin += max(0.0, k - a)
-            s_e += 1.0
-            sum_z_entrep += z
-
-    # Wealth concentration: top 5% share
-    sorted_a = np.sort(a_sim)[::-1]
-    top5_idx = max(1, int(0.05 * n))
-    wealth_top5 = np.sum(sorted_a[:top5_idx]) / max(np.sum(a_sim), 1e-10)
-
-    avg_z_entrep = sum_z_entrep / max(s_e, 1.0)
-
-    return K/n, L/n, Y/n, A/n, extfin/n, s_e/n, avg_z_entrep, wealth_top5
-
 def generate_shocks(n_agents, t_steps, psi, prob_z):
     np.random.seed(42)
     resets = (np.random.rand(t_steps, n_agents) > psi).astype(np.uint8)
@@ -444,7 +415,7 @@ def generate_shocks_with_tau(n_agents, t_steps, psi, prob_z, prob_tau_plus):
         tau_shocks[t] = (np.random.rand(n_agents) < probs).astype(np.uint8)
     return resets, shocks, tau_shocks
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def compute_sim_aggregates_with_dist(a_sim, z_idx_sim, tau_sim, z_grid, w, r, lam, delta, alpha, upsilon):
     n = len(a_sim)
     K, L, Y, A, extfin, s_e = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -463,203 +434,115 @@ def compute_sim_aggregates_with_dist(a_sim, z_idx_sim, tau_sim, z_grid, w, r, la
             s_e += 1.0
     return K/n, L/n, Y/n, A/n, extfin/n, s_e/n
 
-def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-0.04,
-                            max_iter=100, tol=1e-3, verbose=True):
-    """Find stationary equilibrium WITHOUT distortions using simultaneous price updates."""
+def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-0.04, verbose=True):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     w, r = w_init, r_init
     V = None
     resets, shocks = generate_shocks(N_AGENTS, T_SIM_SS, PSI, prob_z)
-
-    # Price adjustment parameters
-    w_step, r_step = 0.3, 0.05
-    exc_L_prev, exc_K_prev = 0.0, 0.0
-    w_prev, r_prev = w, r
-    best_error = np.inf
-    best_result = None
-
-    for iteration in range(max_iter):
-        # 1. Pre-compute entrepreneur solutions
-        _, _, _, _, _, inc = precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon)
-
-        # 2. Solve value function
-        V, pol_idx = solve_value_function(a_grid, z_grid, prob_z, inc, beta, sigma, psi, V_init=V)
-
-        # 3. Simulate to find distribution
-        np.random.seed(123)
-        a_curr = np.ones(N_AGENTS) * a_grid[0]
-        z_idx_curr = np.random.randint(0, len(z_grid), N_AGENTS)
-        pol_vals = a_grid[pol_idx]
-        for t in range(T_SIM_SS):
-            a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[t], shocks[t])
-
-        # 4. Compute aggregates (extended version for additional stats)
-        K, L, Y, A, extfin, s_e, avg_z_e, wealth_top5 = compute_sim_aggregates_extended(
-            a_curr, z_idx_curr, z_grid, w, r, lam, delta, alpha, upsilon)
+    
+    r_step = 0.02
+    last_exc_K = 0.0
+    
+    for outer_it in range(50):
+        # Clear Labor Market (Inner Loop)
+        w_step = 0.2
+        last_exc_L = 0.0
+        for inner_it in range(50):
+            _, _, _, _, _, inc = precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon)
+            V, pol_idx = solve_value_function(a_grid, z_grid, prob_z, inc, beta, sigma, psi, V_init=V)
+            
+            np.random.seed(123)
+            a_curr, z_idx_curr = np.ones(N_AGENTS) * a_grid[0], np.random.randint(0, len(z_grid), N_AGENTS)
+            pol_vals = a_grid[pol_idx]
+            for t in range(T_SIM_SS):
+                a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[t], shocks[t])
+                
+            K, L, Y, A, extfin, s_e = compute_sim_aggregates(a_curr, z_idx_curr, z_grid, w, r, lam, delta, alpha, upsilon)
+            exc_L = L - (1-s_e)
+            
+            if verbose and (inner_it == 0 or inner_it % 5 == 0 or abs(exc_L) < 1e-4):
+                print(f"  [Post SS {outer_it:2d}:{inner_it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
+            
+            if abs(exc_L) < 1e-4: break
+            if inner_it > 0 and np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            last_exc_L = exc_L
+            w *= (1 + w_step * exc_L)
+            w = max(w, 1e-4)
 
         exc_K = K - A
-        exc_L = L - (1 - s_e)
-        total_error = abs(exc_L) + abs(exc_K)
+        if verbose: print(f"  [Post SS Outer {outer_it:2d}] Capital Market Error: {exc_K:.6f}")
+        if abs(exc_K) < 1e-4: break
+        
+        if abs(exc_K) < 1e-4: break
+        
+        if outer_it > 0 and np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+        last_exc_K = exc_K
+        r += r_step * exc_K
+        r = max(min(r, 1/beta - 1 - 1e-6), -0.5)
+        
+    return {'w':w, 'r':r, 'Y':Y, 'K':K, 'L':L, 'A':A, 'TFP': Y/max(((K**alpha) * ((1-s_e)**(1-alpha)))**(1-upsilon), 1e-8),
+            'share_entre':s_e, 'extfin_Y':extfin/Y, 'V':V, 'pol_idx':pol_idx, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr}
 
-        if verbose:
-            print(f"  [Post SS {iteration+1:3d}] w={w:.6f} r={r:.6f} | ExcL={exc_L:.4f} ExcK={exc_K:.4f}")
-
-        # Track best result
-        if total_error < best_error:
-            best_error = total_error
-            best_result = {'w': w, 'r': r, 'Y': Y, 'K': K, 'L': L, 'A': A,
-                          'extfin': extfin, 's_e': s_e, 'V': V.copy(), 'pol_idx': pol_idx.copy(),
-                          'a_sim': a_curr.copy(), 'z_idx_sim': z_idx_curr.copy(),
-                          'avg_z_entrep': avg_z_e, 'wealth_top5_share': wealth_top5}
-
-        # Convergence check 1: excess demands small
-        if abs(exc_L) < tol and abs(exc_K) < tol:
-            if verbose: print(f"  Converged (excess demands)!")
-            break
-
-        # Convergence check 2: prices stabilized (simulation noise floor reached)
-        price_change = abs(w - w_prev)/max(w, 1e-6) + abs(r - r_prev)/max(abs(r), 1e-6)
-        if iteration > 5 and price_change < 1e-6 and (w_step < 0.01 or r_step < 0.005):
-            if verbose: print(f"  Converged (prices stabilized, simulation noise floor)!")
-            break
-
-        # Adaptive damping (reduce step if sign flips)
-        if iteration > 0:
-            if exc_L * exc_L_prev < 0: w_step *= 0.5
-            if exc_K * exc_K_prev < 0: r_step *= 0.5
-
-        # Simultaneous price updates
-        w_new = w * (1 + w_step * exc_L)
-        r_new = r + r_step * exc_K
-
-        # Bounds
-        w_new = max(0.01, min(2.5, w_new))
-        r_new = max(-0.25, min(1/beta - 1 - 1e-6, r_new))
-
-        # Damped update
-        damping = 0.5
-        w_prev, r_prev = w, r
-        w = damping * w + (1 - damping) * w_new
-        r = damping * r + (1 - damping) * r_new
-
-        exc_L_prev, exc_K_prev = exc_L, exc_K
-
-    # Use best result
-    res = best_result
-    TFP = res['Y'] / max(((res['K']**alpha) * ((1-res['s_e'])**(1-alpha)))**(1-upsilon), 1e-8)
-
-    return {'w': res['w'], 'r': res['r'], 'Y': res['Y'], 'K': res['K'], 'L': res['L'], 'A': res['A'],
-            'TFP': TFP, 'share_entre': res['s_e'], 'extfin_Y': res['extfin']/res['Y'] if res['Y'] > 0 else 0,
-            'V': res['V'], 'pol_idx': res['pol_idx'], 'a_sim': res['a_sim'], 'z_idx_sim': res['z_idx_sim']}
-
-def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, tau_p, tau_m,
-                                w_init=0.55, r_init=-0.04, max_iter=100, tol=1e-3, verbose=True):
-    """Find stationary equilibrium WITH distortions using simultaneous price updates."""
+def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, tau_p, tau_m, w_init=0.55, r_init=-0.04, verbose=True):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     w, r = w_init, r_init
     V_p, V_m = None, None
     resets, shocks, tau_shocks = generate_shocks_with_tau(N_AGENTS, T_SIM_SS, PSI, prob_z, prob_tau_plus)
-
-    # Price adjustment parameters
-    w_step, r_step = 0.3, 0.05
-    exc_L_prev, exc_K_prev = 0.0, 0.0
-    w_prev, r_prev = w, r
-    best_error = np.inf
-    best_result = None
-
-    for iteration in range(max_iter):
-        # 1. Pre-compute entrepreneur solutions for both tau states
-        _, _, _, _, _, inc_p = precompute_entrepreneur_with_tau(a_grid, z_grid, tau_p, w, r, lam, delta, alpha, upsilon)
-        _, _, _, _, _, inc_m = precompute_entrepreneur_with_tau(a_grid, z_grid, tau_m, w, r, lam, delta, alpha, upsilon)
-
-        # 2. Solve coupled value function
-        V_p, V_m, pol_p_idx, pol_m_idx = solve_value_function_coupled(
-            a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi,
-            V_p_init=V_p, V_m_init=V_m, n_howard=15
-        )
-
-        # 3. Simulate to find distribution
-        np.random.seed(123)
-        a_curr = np.ones(N_AGENTS) * a_grid[0]
-        z_idx_curr = np.random.randint(0, len(z_grid), N_AGENTS)
-        tau_curr = np.array([tau_p if np.random.rand() < prob_tau_plus[z_idx_curr[i]] else tau_m for i in range(N_AGENTS)])
-        pol_p_vals, pol_m_vals = a_grid[pol_p_idx], a_grid[pol_m_idx]
-        for t in range(T_SIM_SS):
-            a_curr, z_idx_curr, tau_curr = simulate_step_coupled(
-                a_curr, z_idx_curr, tau_curr, pol_p_vals, pol_m_vals, a_grid,
-                resets[t], shocks[t], tau_shocks[t], tau_p, tau_m
-            )
-
-        # 4. Compute aggregates
-        K, L, Y, A, extfin, s_e = compute_sim_aggregates_with_dist(
-            a_curr, z_idx_curr, tau_curr, z_grid, w, r, lam, delta, alpha, upsilon
-        )
+    
+    r_step = 0.02
+    last_exc_K = 0.0
+    
+    for outer_it in range(50):
+        # Clear Labor be careful! (Inner Loop)
+        w_step = 0.2
+        last_exc_L = 0.0
+        for inner_it in range(50):
+            _, _, _, _, _, inc_p = precompute_entrepreneur_with_tau(a_grid, z_grid, tau_p, w, r, lam, delta, alpha, upsilon)
+            _, _, _, _, _, inc_m = precompute_entrepreneur_with_tau(a_grid, z_grid, tau_m, w, r, lam, delta, alpha, upsilon)
+            V_p, V_m, pol_p_idx, pol_m_idx = solve_value_function_coupled(a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi, V_p_init=V_p, V_m_init=V_m, n_howard=15)
+            
+            np.random.seed(123)
+            a_curr, z_idx_curr = np.ones(N_AGENTS) * a_grid[0], np.random.randint(0, len(z_grid), N_AGENTS)
+            tau_curr = np.array([tau_p if np.random.rand() < prob_tau_plus[z_idx_curr[i]] else tau_m for i in range(N_AGENTS)])
+            pol_p_vals, pol_m_vals = a_grid[pol_p_idx], a_grid[pol_m_idx]
+            for t in range(T_SIM_SS):
+                a_curr, z_idx_curr, tau_curr = simulate_step_coupled(a_curr, z_idx_curr, tau_curr, pol_p_vals, pol_m_vals, a_grid, resets[t], shocks[t], tau_shocks[t], tau_p, tau_m)
+            
+            K, L, Y, A, extfin, s_e = compute_sim_aggregates_with_dist(a_curr, z_idx_curr, tau_curr, z_grid, w, r, lam, delta, alpha, upsilon)
+            exc_L = L - (1-s_e)
+            
+            if verbose and (inner_it == 0 or inner_it % 5 == 0 or abs(exc_L) < 1e-4):
+                print(f"  [Pre SS {outer_it:2d}:{inner_it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
+            
+            if L < 1e-4:
+                w *= 0.5; continue
+            if abs(exc_L) < 1e-4: break
+            if inner_it > 0 and np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            last_exc_L = exc_L
+            w *= (1 + w_step * exc_L)
+            w = max(w, 1e-4)
 
         exc_K = K - A
-        exc_L = L - (1 - s_e)
-        total_error = abs(exc_L) + abs(exc_K)
+        if verbose: print(f"  [Pre SS Outer {outer_it:2d}] Capital Market Error: {exc_K:.6f}")
+        if abs(exc_K) < 1e-4: break
+        
+        if abs(exc_K) < 1e-4: break
+        
+        if outer_it > 0 and np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+        last_exc_K = exc_K
+        r += r_step * exc_K
+        r = max(min(r, 1/beta - 1 - 1e-6), -0.5)
+        
+    return {'w':w, 'r':r, 'Y':Y, 'K':K, 'L':L, 'A':A, 'TFP': Y/max(((K**alpha) * ((1-s_e)**(1-alpha)))**(1-upsilon), 1e-8),
+            'share_entre':s_e, 'extfin_Y':extfin/Y, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr, 'tau_sim':tau_curr, 'V_p':V_p, 'V_m':V_m}
 
-        if verbose:
-            print(f"  [Pre SS {iteration+1:3d}] w={w:.6f} r={r:.6f} | ExcL={exc_L:.4f} ExcK={exc_K:.4f}")
-
-        # Track best result
-        if total_error < best_error:
-            best_error = total_error
-            best_result = {'w': w, 'r': r, 'Y': Y, 'K': K, 'L': L, 'A': A,
-                          'extfin': extfin, 's_e': s_e, 'V_p': V_p.copy(), 'V_m': V_m.copy(),
-                          'a_sim': a_curr.copy(), 'z_idx_sim': z_idx_curr.copy(), 'tau_sim': tau_curr.copy()}
-
-        # Convergence check 1: excess demands small
-        if abs(exc_L) < tol and abs(exc_K) < tol:
-            if verbose: print(f"  Converged (excess demands)!")
-            break
-
-        # Convergence check 2: prices stabilized (simulation noise floor reached)
-        price_change = abs(w - w_prev)/max(w, 1e-6) + abs(r - r_prev)/max(abs(r), 1e-6)
-        if iteration > 5 and price_change < 1e-6 and (w_step < 0.01 or r_step < 0.005):
-            if verbose: print(f"  Converged (prices stabilized, simulation noise floor)!")
-            break
-
-        # Handle collapse case
-        if L < 1e-4 or Y < 1e-6:
-            w *= 0.8
-            if verbose: print(f"  [WARNING] Collapse detected, reducing w")
-            continue
-
-        # Adaptive damping (reduce step if sign flips)
-        if iteration > 0:
-            if exc_L * exc_L_prev < 0: w_step *= 0.5
-            if exc_K * exc_K_prev < 0: r_step *= 0.5
-
-        # Simultaneous price updates
-        w_new = w * (1 + w_step * exc_L)
-        r_new = r + r_step * exc_K
-
-        # Bounds
-        w_new = max(0.01, min(2.5, w_new))
-        r_new = max(-0.25, min(1/beta - 1 - 1e-6, r_new))
-
-        # Damped update
-        damping = 0.5
-        w_prev, r_prev = w, r
-        w = damping * w + (1 - damping) * w_new
-        r = damping * r + (1 - damping) * r_new
-
-        exc_L_prev, exc_K_prev = exc_L, exc_K
-
-    # Use best result
-    res = best_result
-    TFP = res['Y'] / max(((res['K']**alpha) * ((1-res['s_e'])**(1-alpha)))**(1-upsilon), 1e-8)
-
-    return {'w': res['w'], 'r': res['r'], 'Y': res['Y'], 'K': res['K'], 'L': res['L'], 'A': res['A'],
-            'TFP': TFP, 'share_entre': res['s_e'], 'extfin_Y': res['extfin']/res['Y'] if res['Y'] > 0 else 0,
-            'V_p': res['V_p'], 'V_m': res['V_m'], 'a_sim': res['a_sim'], 'z_idx_sim': res['z_idx_sim'], 'tau_sim': res['tau_sim']}
-
-def solve_transition(pre_eq, post_eq, params, a_grid, z_grid, prob_z, T=50):
-    """Solve transition path using simulation."""
+def solve_transition(pre_eq, post_eq, params, T=50):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     w_path = np.linspace(pre_eq['w'], post_eq['w'], T)
     r_path = np.linspace(pre_eq['r'], post_eq['r'], T)
+    
+    a_grid = create_asset_grid(501, 1e-6, 4000)
+    z_grid, prob_z = create_ability_grid_paper(ETA)
     
     resets, shocks = generate_shocks(N_AGENTS, T, PSI, prob_z)
     
@@ -748,7 +631,7 @@ def main():
         return
 
     print("Step 3: Transition (Simulation)")
-    trans = solve_transition(pre_eq, post_eq, params, a_grid, z_grid, prob_z, T=args.T)
+    trans = solve_transition(pre_eq, post_eq, params, T=args.T)
     
     plot_transition(pre_eq, post_eq, trans, args.output_dir)
 

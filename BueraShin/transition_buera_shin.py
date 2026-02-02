@@ -57,8 +57,8 @@ Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0
 Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 20
-N_CHEBY_Z = 20
+N_CHEBY_A = 10
+N_CHEBY_Z = 10
 
 # =============================================================================
 # Bivariate Spectral Tools (from v6)
