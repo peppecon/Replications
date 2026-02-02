@@ -123,7 +123,7 @@ def generate_bivariate_nodes_matrix(a_min, a_max, z_min, z_max):
 def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
     rental = max(r + delta, 1e-8)
     wage = max(w, 1e-8)
-    span = 1 - NU
+    span = 1 - upsilon
     exp_k = 1 - (1-alpha)*span
     exp_l = (1-alpha)*span
     k1 = ( ( (alpha*span*z/rental)**exp_k ) * ( ((1-alpha)*span*z/wage)**exp_l ) ) ** (1/NU)
