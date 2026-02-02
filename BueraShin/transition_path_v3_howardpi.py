@@ -1032,9 +1032,27 @@ def save_results(pre_eq, post_eq, trans, output_dir='outputs'):
 def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     os.makedirs(output_dir, exist_ok=True)
 
-    t = trans['t']
+    # Padding settings: -4 to 20
+    T_limit = 20
+    limit_idx = np.where(trans['t'] == T_limit)[0][0] + 1
+    t_plot = np.concatenate([np.arange(-4, 0), trans['t'][:limit_idx]])
+    
+    def pad(path, pre_val):
+        return np.concatenate([np.full(4, pre_val), path[:limit_idx]])
+
     Y_pre, K_pre, TFP_pre = pre_eq['Y'], pre_eq['K'], pre_eq['TFP']
     I_Y_pre = (DELTA * K_pre) / max(Y_pre, 1e-8)
+
+    # Prepare padded paths
+    Y_path_plot = pad(trans['Y'], Y_pre) / Y_pre
+    TFP_path_plot = pad(trans['TFP'], TFP_pre) / TFP_pre
+    r_path_plot = pad(trans['r'], pre_eq['r'])
+    w_path_plot = pad(trans['w'], pre_eq['w']) / pre_eq['w']
+    I_path_plot = pad(trans['I_Y'], I_Y_pre) - I_Y_pre
+    K_path_plot = pad(trans['K'], K_pre) / K_pre
+    
+    AvgZ_path_plot = pad(trans['AvgZ'], pre_eq['avg_z_entrep']) / pre_eq['avg_z_entrep']
+    WealthTop5_path_plot = pad(trans['WealthTop5'], pre_eq['wealth_top5_share'])
 
     # -------------------------------------------------------------------------
     # Figure 1: Aggregate Dynamics (Paper Figs 3 & 4 style)
@@ -1042,42 +1060,48 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
     # Output (Normalized by Pre)
-    axes[0,0].plot(t, trans['Y']/Y_pre, 'b-', lw=2, label=f'λ={LAMBDA}')
+    axes[0,0].plot(t_plot, Y_path_plot, 'b-', lw=2, label=f'λ={LAMBDA}')
+    axes[0,0].axvline(0, color='k', ls='-', alpha=0.3) # Shock line
     axes[0,0].axhline(post_eq['Y']/Y_pre, color='r', ls='--', alpha=0.7, label='Post SS')
     axes[0,0].axhline(1.0, color='g', ls=':', alpha=0.7, label='Pre SS')
     axes[0,0].set_xlabel('Period'); axes[0,0].set_ylabel('Y / Y_pre')
     axes[0,0].set_title('Output (GDP)'); axes[0,0].grid(True, alpha=0.3); axes[0,0].legend()
 
     # TFP (Normalized by Pre)
-    axes[0,1].plot(t, trans['TFP']/TFP_pre, 'b-', lw=2)
+    axes[0,1].plot(t_plot, TFP_path_plot, 'b-', lw=2)
+    axes[0,1].axvline(0, color='k', ls='-', alpha=0.3)
     axes[0,1].axhline(post_eq['TFP']/TFP_pre, color='r', ls='--')
     axes[0,1].axhline(1.0, color='g', ls=':')
     axes[0,1].set_xlabel('Period'); axes[0,1].set_ylabel('TFP / TFP_pre')
     axes[0,1].set_title('TFP Measure'); axes[0,1].grid(True, alpha=0.3)
 
     # Interest Rate
-    axes[0,2].plot(t, trans['r'], 'b-', lw=2)
+    axes[0,2].plot(t_plot, r_path_plot, 'b-', lw=2)
+    axes[0,2].axvline(0, color='k', ls='-', alpha=0.3)
     axes[0,2].axhline(post_eq['r'], color='r', ls='--')
     axes[0,2].axhline(pre_eq['r'], color='g', ls=':')
     axes[0,2].set_xlabel('Period'); axes[0,2].set_ylabel('r')
     axes[0,2].set_title('Interest Rate'); axes[0,2].grid(True, alpha=0.3)
 
     # Wage (Normalized by Pre)
-    axes[1,0].plot(t, trans['w']/pre_eq['w'], 'b-', lw=2)
+    axes[1,0].plot(t_plot, w_path_plot, 'b-', lw=2)
+    axes[1,0].axvline(0, color='k', ls='-', alpha=0.3)
     axes[1,0].axhline(post_eq['w']/pre_eq['w'], color='r', ls='--')
     axes[1,0].axhline(1.0, color='g', ls=':')
     axes[1,0].set_xlabel('Period'); axes[1,0].set_ylabel('w / w_pre')
     axes[1,0].set_title('Real Wage'); axes[1,0].grid(True, alpha=0.3)
 
     # Investment Rate (Deviation from Pre)
-    axes[1,1].plot(t, trans['I_Y'] - I_Y_pre, 'b-', lw=2)
+    axes[1,1].plot(t_plot, I_path_plot, 'b-', lw=2)
+    axes[1,1].axvline(0, color='k', ls='-', alpha=0.3)
     axes[1,1].axhline(0.0, color='g', ls=':')
     axes[1,1].axhline((post_eq['K']*DELTA/post_eq['Y']) - I_Y_pre, color='r', ls='--')
     axes[1,1].set_xlabel('Period'); axes[1,1].set_ylabel('i - i_pre')
     axes[1,1].set_title('Investment Rate Deviation'); axes[1,1].grid(True, alpha=0.3)
 
     # Capital Stock (Normalized by Pre)
-    axes[1,2].plot(t, trans['K']/K_pre, 'b-', lw=2)
+    axes[1,2].plot(t_plot, K_path_plot, 'b-', lw=2)
+    axes[1,2].axvline(0, color='k', ls='-', alpha=0.3)
     axes[1,2].axhline(post_eq['K']/K_pre, color='r', ls='--')
     axes[1,2].axhline(1.0, color='g', ls=':')
     axes[1,2].set_xlabel('Period'); axes[1,2].set_ylabel('K / K_pre')
@@ -1093,14 +1117,16 @@ def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # Average Entrepreneurial Ability (Normalized by Pre)
-    axes[0].plot(t, trans['AvgZ']/pre_eq['avg_z_entrep'], 'b-', lw=2)
+    axes[0].plot(t_plot, AvgZ_path_plot, 'b-', lw=2)
+    axes[0].axvline(0, color='k', ls='-', alpha=0.3)
     axes[0].axhline(post_eq['avg_z_entrep']/pre_eq['avg_z_entrep'], color='r', ls='--')
     axes[0].axhline(1.0, color='g', ls=':')
     axes[0].set_xlabel('Period'); axes[0].set_ylabel('Ability / Ability_pre')
     axes[0].set_title('Avg. Entrep. Ability'); axes[0].grid(True, alpha=0.3)
 
     # Wealth share of top 5% ability
-    axes[1].plot(t, trans['WealthTop5'], 'b-', lw=2)
+    axes[1].plot(t_plot, WealthTop5_path_plot, 'b-', lw=2)
+    axes[1].axvline(0, color='k', ls='-', alpha=0.3)
     axes[1].axhline(post_eq['wealth_top5_share'], color='r', ls='--')
     axes[1].axhline(pre_eq['wealth_top5_share'], color='g', ls=':')
     axes[1].set_xlabel('Period'); axes[1].set_ylabel('Share')
