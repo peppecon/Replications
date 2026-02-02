@@ -49,36 +49,27 @@ T_SIM = 500
 
 def create_ability_grid_paper(eta):
     """
-    Refined 40-point ability discretization matching paper benchmarks.
-    Uses equispaced levels for the first 38 points and specific tail points.
+    Paper's exact 40-point ability discretization.
+    Dynamically computed based on ETA to ensure consistent scale.
     """
-    # Exact z-levels (matches paper's implied benchmarks)
-    z_grid = np.array([
-        0.22327298, 0.24140333, 0.25953369, 0.27766404, 0.2957944,  0.31392475,
-        0.33205511, 0.35018546, 0.36831582, 0.38644617, 0.40457653, 0.42270689,
-        0.44083724, 0.4589676,  0.47709795, 0.49522831, 0.51335866, 0.53148902,
-        0.54961937, 0.56774973, 0.58588008, 0.60401044, 0.6221408,  0.64027115,
-        0.65840151, 0.67653186, 0.69466222, 0.71279257, 0.73092293, 0.74905328,
-        0.76718364, 0.78531399, 0.80344435, 0.82157471, 0.83970506, 0.85783542,
-        0.87596577, 0.89409613, 1.0566267,  1.2487023
-    ])
+    n_z = 40
+    M_values = np.zeros(n_z)
+    M_values[:38] = np.linspace(0.633, 0.998, 38)
+    M_values[38] = 0.999
+    M_values[39] = 0.9995
+    z_grid = (1 - M_values) ** (-1/eta)
 
-    # Exact probability weights
-    prob_z = np.array([
-        0.36689083, 0.17535447, 0.11895196, 0.08292238, 0.05919128, 0.04313795,
-        0.03202057, 0.0241597,  0.01849731, 0.0143500,  0.01126632, 0.00894195,
-        0.00716797, 0.00579853, 0.00473024, 0.0038888,  0.00322009, 0.00268422,
-        0.00225148, 0.00189951, 0.00161129, 0.00137379, 0.00117693, 0.00101283,
-        0.00087533, 0.00075955, 0.00066159, 0.00057835, 0.00050732, 0.00044646,
-        0.00039412, 0.00034894, 0.00030981, 0.00027581, 0.00024617, 0.00022026,
-        0.00019754, 0.00017756, 0.0010005,  0.00050025
-    ])
+    prob_z = np.zeros(n_z)
+    prob_z[0] = M_values[0] / M_values[-1]
+    for j in range(1, n_z):
+        prob_z[j] = (M_values[j] - M_values[j-1]) / M_values[-1]
+    prob_z = prob_z / prob_z.sum()
 
-    return z_grid, prob_z / prob_z.sum()
+    return z_grid, prob_z
 
 
-def create_asset_grid(n_a, a_min, a_max, a_scale=3):
-    """Asset grid with polynomial spacing for better precision at the bottom"""
+def create_asset_grid(n_a, a_min, a_max, a_scale=2):
+    """Asset grid with curvature scaling (Default power 2 to match V3)"""
     a_grid = a_min + (a_max - a_min) * np.linspace(0, 1, n_a) ** a_scale
     a_grid[0] = max(a_grid[0], 1e-6)
     return a_grid
@@ -455,7 +446,7 @@ def run_simulation_appendix(a_grid, z_grid, prob_z, policy_a_idx, psi, w, r, lam
 # =============================================================================
 
 def find_equilibrium_sim(a_grid, z_grid, prob_z, params, fixed_shocks,
-                          w_init=0.172, r_init=0.0476, V_init=None,
+                          w_init=0.80, r_init=-0.04, V_init=None,
                           max_iter=100, tol=1e-3, verbose=True):
     """Find stationary equilibrium using simulation-based distribution"""
     delta, alpha, upsilon, lam, beta, sigma, psi = params
@@ -550,7 +541,9 @@ def find_equilibrium_sim(a_grid, z_grid, prob_z, params, fixed_shocks,
     }
     agg = result['agg']
 
-    TFP = agg['Y'] / (agg['K'] ** (1/3) * agg['L'] ** (2/3)) if agg['K'] > 0 and agg['L'] > 0 else 0
+    span = 1 - upsilon
+    L_s = 1 - agg['share_entre']
+    TFP = agg['Y'] / max(((agg['K'] ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
 
     return {
         'w': result['w'], 'r': result['r'],
@@ -580,7 +573,7 @@ if __name__ == "__main__":
 
     print("\n1. Setting up model grids...")
     z_grid, prob_z = create_ability_grid_paper(ETA)
-    a_grid = create_asset_grid(n_a, a_min, a_max, a_scale)
+    a_grid = create_asset_grid(n_a, a_min, a_max, a_scale=2)
     n_z = len(z_grid)
 
     print(f"   Ability grid: {n_z} points (paper's exact discretization)")
@@ -631,12 +624,8 @@ if __name__ == "__main__":
     lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.2, 1.15, 1.1, 1.0]
 
     initial_guesses = {
-        np.inf: (0.171, 0.0472),
-        2.0:    (0.15, 0.03),
-        1.75:   (0.14, 0.02),
-        1.5:    (0.13, 0.01),
-        1.25:   (0.12, 0.00),
-        1.0:    (0.10, -0.01),
+        np.inf: (0.80, -0.04),
+        1.0:    (0.50, -0.05),
     }
 
     results_list = []
