@@ -669,7 +669,7 @@ def solve_transition(pre_eq, post_eq, params, a_grid, z_grid, prob_z, T=50):
     last_ED_L = np.zeros(T)
     last_ED_K = np.zeros(T)
     
-    for it in range(30):
+    for it in range(50):
         # 1. Backward Pass
         V_path = [None] * T
         V_path[T-1] = post_eq['V']
@@ -703,30 +703,133 @@ def solve_transition(pre_eq, post_eq, params, a_grid, z_grid, prob_z, T=50):
             for t in range(T):
                 if np.sign(ED_L[t]) != np.sign(last_ED_L[t]): w_step_path[t] *= 0.5
                 if np.sign(ED_K[t]) != np.sign(last_ED_K[t]): r_step_path[t] *= 0.5
+                
+                # Enforce lower bounds to prevent stalling
+                w_step_path[t] = max(w_step_path[t], 1e-4)
+                r_step_path[t] = max(r_step_path[t], 1e-5)
         
         last_ED_L[:] = ED_L[:]
         last_ED_K[:] = ED_K[:]
         
-        w_path += w_step_path * ED_L
-        r_path += r_step_path * ED_K
+        w_path_target = w_path + w_step_path * ED_L
+        r_path_target = r_path + r_step_path * ED_K
         
-        # Guards
-        w_path = np.maximum(w_path, 1e-4)
-        r_path = np.maximum(np.minimum(r_path, 1/beta - 1 - 1e-6), -0.5)
+        # Guards on target
+        w_path_target = np.maximum(w_path_target, 1e-4)
+        r_path_target = np.maximum(np.minimum(r_path_target, 1/beta - 1 - 1e-6), -0.5)
+        
+        # Damped Update
+        damping = 0.7
+        w_path = damping * w_path + (1 - damping) * w_path_target
+        r_path = damping * r_path + (1 - damping) * r_path_target
         
     return {'t': np.arange(T), 'w': w_path, 'r': r_path, 'Y': np.array(Y_path), 'K': np.array(K_path), 'TFP': np.array(TFP_path)}
 
 def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
     os.makedirs(output_dir, exist_ok=True)
-    plt.figure(figsize=(10,6))
-    plt.plot(trans['t'], trans['Y']/pre_eq['Y'], label='Output')
-    plt.plot(trans['t'], trans['TFP']/pre_eq['TFP'], '--', label='TFP')
-    plt.legend(); plt.grid(True)
+    
+    # Premium Styling
+    plt.rcParams.update({
+        'font.size': 12, 'axes.titlesize': 14, 'axes.labelsize': 12,
+        'xtick.labelsize': 10, 'ytick.labelsize': 10, 'legend.fontsize': 10,
+        'figure.titlesize': 16, 'grid.alpha': 0.3, 'lines.linewidth': 2.5
+    })
+
+    # Prepare V4 Data (Simulation)
+    T = len(trans['t'])
+    t_plot = trans['t']
+    
+    norm_Y = trans['Y'] / pre_eq['Y']
+    norm_TFP = trans['TFP'] / pre_eq['TFP']
+    norm_K = trans['K'] / pre_eq['K']
+    norm_w = trans['w'] / pre_eq['w']
+    path_r = trans['r']
+
+    # Load V3 Data (Howard PI Comparison)
+    v3_data = None
+    v3_path = os.path.join(output_dir, 'transition_v3.csv')
+    if os.path.exists(v3_path):
+        try:
+            import csv
+            v3_t, v3_Y, v3_K, v3_TFP, v3_w, v3_r = [], [], [], [], [], []
+            with open(v3_path, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if float(row['t']) < T:
+                        v3_t.append(float(row['t']))
+                        v3_Y.append(float(row['Y']))
+                        v3_K.append(float(row['K']))
+                        v3_TFP.append(float(row['TFP']))
+                        v3_w.append(float(row['w']))
+                        v3_r.append(float(row['r']))
+            
+            # Normalize V3 data by its own initial value (assumed at t=0)
+            if len(v3_Y) > 0:
+                v3_Y_norm = np.array(v3_Y) / v3_Y[0]
+                v3_K_norm = np.array(v3_K) / v3_K[0]
+                v3_TFP_norm = np.array(v3_TFP) / -v3_TFP[0] if v3_TFP[0] < 0 else np.array(v3_TFP) / v3_TFP[0] # Handle sign if needed
+                # Re-normalize using user's V4 pre-eq for consistent visual baseline if V3 matches
+                # Better: Normalize V3 by its own pre-eq implicit in t=0
+                
+                v3_data = {
+                    't': np.array(v3_t),
+                    'Y': np.array(v3_Y) / v3_Y[0],
+                    'K': np.array(v3_K) / v3_K[0],
+                    'TFP': np.array(v3_TFP) / v3_TFP[0],
+                    'w': np.array(v3_w) / v3_w[0],
+                    'r': np.array(v3_r)
+                }
+                print(f"Loaded V3 comparison data ({len(v3_t)} periods)")
+        except Exception as e:
+            print(f"Failed to load V3 comparison: {e}")
+
+    # Plotting
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    
+    # 1. Output
+    ax = axes[0,0]
+    ax.plot(t_plot, norm_Y, 'b-', label='Sim (V4)')
+    if v3_data: ax.plot(v3_data['t'], v3_data['Y'], 'r--', label='Howard (V3)')
+    ax.set_title('Output (Y)'); ax.legend()
+    
+    # 2. TFP
+    ax = axes[0,1]
+    ax.plot(t_plot, norm_TFP, 'b-')
+    if v3_data: ax.plot(v3_data['t'], v3_data['TFP'], 'r--')
+    ax.set_title('TFP')
+    
+    # 3. Capital
+    ax = axes[0,2]
+    ax.plot(t_plot, norm_K, 'b-')
+    if v3_data: ax.plot(v3_data['t'], v3_data['K'], 'r--')
+    ax.set_title('Capital (K)')
+
+    # 4. Wage
+    ax = axes[1,0]
+    ax.plot(t_plot, norm_w, 'b-')
+    if v3_data: ax.plot(v3_data['t'], v3_data['w'], 'r--')
+    ax.set_title('Wage (w)')
+
+    # 5. Interest Rate
+    ax = axes[1,1]
+    ax.plot(t_plot, path_r, 'b-')
+    if v3_data: ax.plot(v3_data['t'], v3_data['r'], 'r--')
+    ax.set_title('Interest Rate (r)')
+
+    # 6. Convergence Metrics (ED)
+    # ax = axes[1,2] ... unused
+
+    for ax in axes.flatten():
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel('Period')
+    
+    plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'transition_sim_v4.png'), dpi=200)
+    print(f"Plot saved to {os.path.join(output_dir, 'transition_sim_v4.png')}")
 
 def main():
     parser = argparse.ArgumentParser(description="Buera-Shin Simulation-Based Transition")
-    parser.add_argument("--T", type=int, default=50, help="Transition periods")
+    parser.add_argument("--T", type=int, default=125, help="Transition periods")
     parser.add_argument("--na", type=int, default=501, help="Asset grid points")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
     args = parser.parse_args()
