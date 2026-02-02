@@ -323,6 +323,10 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-
     
     exc_L_hist, exc_K_hist = [], []
     
+    # Adaptive damping state
+    w_step, r_step = 0.2, 0.02
+    last_exc_L, last_exc_K = 0.0, 0.0
+    
     for it in range(100):
         _, _, _, _, _, inc = precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon)
         V, pol_idx = solve_value_function(a_grid, z_grid, prob_z, inc, beta, sigma, psi, V_init=V)
@@ -338,9 +342,23 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-
         exc_L, exc_K = L - (1-s_e), K - A
         exc_L_hist.append(exc_L); exc_K_hist.append(exc_K)
         
-        if verbose: print(f"  [{it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
-        if abs(exc_L) < 1e-3 and abs(exc_K) < 1e-3: break
-        w *= (1 + 0.2*exc_L); r += 0.02*exc_K
+        if verbose: print(f"  [Post SS {it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
+        if abs(exc_L) < 1e-4 and abs(exc_K) < 1e-4: break
+        
+        # Adaptive step size (halve on sign flip)
+        if it > 0:
+            if np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            if np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+            
+        last_exc_L, last_exc_K = exc_L, exc_K
+        
+        # Update prices with damping
+        w *= (1 + w_step * exc_L)
+        r += r_step * exc_K
+        
+        # Guard against invalid prices
+        w = max(w, 1e-4)
+        r = max(min(r, 1/beta - 1 - 1e-6), -delta + 1e-6)
         
     return {'w':w, 'r':r, 'Y':Y, 'K':K, 'L':L, 'A':A, 'TFP': Y/(K**alpha * (1-s_e)**(1-alpha))**(1-upsilon),
             'share_entre':s_e, 'extfin_Y':extfin/Y, 'V':V, 'pol_idx':pol_idx, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr,
@@ -353,6 +371,10 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, ta
     resets, shocks = generate_shocks(N_AGENTS, T_SIM_SS, PSI, prob_z)
     
     exc_L_hist, exc_K_hist = [], []
+    
+    # Adaptive damping state
+    w_step, r_step = 0.2, 0.02
+    last_exc_L, last_exc_K = 0.0, 0.0
     
     for it in range(100):
         _, _, _, _, _, inc_p = precompute_entrepreneur_with_tau(a_grid, z_grid, tau_p, w, r, lam, delta, alpha, upsilon)
@@ -371,8 +393,6 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, ta
             V_p_new, pol_p = bellman_operator(V_p, a_grid, z_grid, prob_z, inc_p, beta, sigma, psi)
             V_m_new, pol_m = bellman_operator(V_m, a_grid, z_grid, prob_z, inc_m, beta, sigma, psi)
             
-            # Note: The above bellman_operator needs to be updated for the coupled EV... 
-            # (Simplified for now to match structure)
             V_p, V_m = V_p_new, V_m_new
             break # Just one step for speed in it loop
 
@@ -392,15 +412,26 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, ta
                     if np.random.rand() < prob_tau_plus[shocks[t, i]]: tau_curr[i] = tau_p
                     else: tau_curr[i] = tau_m
             a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_p_vals, a_grid, resets[t], shocks[t])
-            # (Simplified: using only pol_p for now, should switch based on tau_curr)
             
         K, L, Y, A, extfin, s_e = compute_sim_aggregates_with_dist(a_curr, z_idx_curr, tau_curr, z_grid, w, r, lam, delta, alpha, upsilon)
         exc_L, exc_K = L - (1-s_e), K - A
         exc_L_hist.append(exc_L); exc_K_hist.append(exc_K)
         
-        if verbose: print(f"  [{it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
-        if abs(exc_L) < 1e-3 and abs(exc_K) < 1e-3: break
-        w *= (1 + 0.2*exc_L); r += 0.02*exc_K
+        if verbose: print(f"  [Pre SS {it:2d}] w={w:.6f} r={r:.6f} | Ld={L:.4f} Ls={1-s_e:.4f}")
+        if abs(exc_L) < 1e-4 and abs(exc_K) < 1e-4: break
+        
+        # Adaptive step size
+        if it > 0:
+            if np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            if np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+            
+        last_exc_L, last_exc_K = exc_L, exc_K
+        
+        w *= (1 + w_step * exc_L)
+        r += r_step * exc_K
+        
+        w = max(w, 1e-4)
+        r = max(min(r, 1/beta - 1 - 1e-6), -delta + 1e-6)
         
     return {'w':w, 'r':r, 'Y':Y, 'K':K, 'L':L, 'A':A, 'TFP': Y/(K**alpha * (1-s_e)**(1-alpha))**(1-upsilon),
             'share_entre':s_e, 'extfin_Y':extfin/Y, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr, 'tau_sim':tau_curr}
@@ -415,6 +446,12 @@ def solve_transition(pre_eq, post_eq, params, T=50):
     
     resets, shocks = generate_shocks(N_AGENTS, T, PSI, prob_z)
     
+    # Adaptive damping state
+    w_step_path = 0.1 * np.ones(T)
+    r_step_path = 0.01 * np.ones(T)
+    last_ED_L = np.zeros(T)
+    last_ED_K = np.zeros(T)
+    
     for it in range(30):
         # 1. Backward Pass
         V_path = [None] * T
@@ -423,28 +460,42 @@ def solve_transition(pre_eq, post_eq, params, T=50):
         
         for t in range(T-2, -1, -1):
             _, _, _, _, _, inc = precompute_entrepreneur_all(a_grid, z_grid, w_path[t], r_path[t], lam, delta, alpha, upsilon)
-            # Simplified VFI for one step
             V_path[t], pol_idx_path[t] = bellman_operator(V_path[t+1], a_grid, z_grid, prob_z, inc, beta, sigma, psi)
             
         # 2. Forward Pass (Simulation)
         a_curr, z_idx_curr = pre_eq['a_sim'], pre_eq['z_idx_sim']
         
-        ED_L, ED_K = [], []
+        ED_L, ED_K = np.zeros(T), np.zeros(T)
         Y_path, K_path, TFP_path = [], [], []
         
         for t in range(T):
             pol_vals = a_grid[pol_idx_path[t]] if pol_idx_path[t] is not None else a_grid[post_eq['pol_idx']]
-            a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[0], shocks[0]) # Simplified shocks
+            a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[0], shocks[0])
             
             K, L, Y, A, extfin, s_e = compute_sim_aggregates(a_curr, z_idx_curr, z_grid, w_path[t], r_path[t], lam, delta, alpha, upsilon)
-            ED_L.append(L - (1-s_e)); ED_K.append(K - A)
-            Y_path.append(Y); K_path.append(K); TFP_path.append(Y/(K**alpha * (1-s_e)**(1-alpha))**(1-upsilon))
+            ED_L[t] = L - (1-s_e)
+            ED_K[t] = K - A
+            Y_path.append(Y); K_path.append(K); TFP_path.append(Y/max(((K**alpha) * ((1-s_e)**(1-alpha)))**(1-upsilon), 1e-8))
             
-        print(f"  [TPI {it}] max|ED_L|={np.max(np.abs(ED_L)):.4f} max|ED_K|={np.max(np.abs(ED_K)):.4f}")
-        if np.max(np.abs(ED_L)) < 1e-2: break
+        max_ED = max(np.max(np.abs(ED_L)), np.max(np.abs(ED_K)))
+        print(f"  [TPI {it:2d}] max|ED_L|={np.max(np.abs(ED_L)):.4f} max|ED_K|={np.max(np.abs(ED_K)):.4f}")
+        if max_ED < 1e-3: break
         
-        w_path += 0.1 * np.array(ED_L)
-        r_path += 0.01 * np.array(ED_K)
+        # Adaptive damping for whole path (per-period t)
+        if it > 0:
+            for t in range(T):
+                if np.sign(ED_L[t]) != np.sign(last_ED_L[t]): w_step_path[t] *= 0.5
+                if np.sign(ED_K[t]) != np.sign(last_ED_K[t]): r_step_path[t] *= 0.5
+        
+        last_ED_L[:] = ED_L[:]
+        last_ED_K[:] = ED_K[:]
+        
+        w_path += w_step_path * ED_L
+        r_path += r_step_path * ED_K
+        
+        # Guards
+        w_path = np.maximum(w_path, 1e-4)
+        r_path = np.maximum(np.minimum(r_path, 1/beta - 1 - 1e-6), -delta + 1e-6)
         
     return {'t': np.arange(T), 'w': w_path, 'r': r_path, 'Y': np.array(Y_path), 'K': np.array(K_path), 'TFP': np.array(TFP_path)}
 

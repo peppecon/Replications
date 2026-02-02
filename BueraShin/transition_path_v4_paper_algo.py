@@ -257,6 +257,11 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-
     w, r = w_init, r_init
     V = None
     resets, shocks = generate_shocks(N_AGENTS, T_SIM_SS, PSI, prob_z)
+    
+    # Adaptive damping state
+    w_step, r_step = 0.2, 0.02
+    last_exc_L, last_exc_K = 0.0, 0.0
+    
     for it in range(100):
         inc = precompute_income(a_grid, z_grid, 0.0, w, r, lam, delta, alpha, upsilon)
         V, pol_idx = solve_value_function(a_grid, z_grid, prob_z, inc, beta, sigma, psi, V_init=V)
@@ -265,35 +270,77 @@ def find_equilibrium_nodist(a_grid, z_grid, prob_z, params, w_init=0.8, r_init=-
         for t in range(T_SIM_SS):
             a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[0], shocks[0])
         agg = compute_full_aggregates_with_stats(a_curr, z_idx_curr, np.zeros(N_AGENTS), z_grid, prob_z, w, r, lam, delta, alpha, upsilon)
-        exc_L, exc_K = agg['L'] - (1-agg['share_entre']), agg['K'] - agg['A']
-        if verbose: print(f"  [Post SS {it:2d}] w={w:.4f} r={r:.4f} | Ld={agg['L']:.4f} Ls={1-agg['share_entre']:.4f}")
+        
+        exc_L = agg['L'] - (1-agg['share_entre'])
+        exc_K = agg['K'] - agg['A']
+        
+        if verbose: print(f"  [Post SS {it:2d}] w={w:.6f} r={r:.6f} | Ld={agg['L']:.4f} Ls={1-agg['share_entre']:.4f}")
         if abs(exc_L) < 1e-4 and abs(exc_K) < 1e-4: break
-        w *= (1 + 0.2*exc_L); r += 0.02*exc_K
-    agg['w'], agg['r'], agg['V'], agg['pol_idx'], agg['a_sim'], agg['z_idx_sim'] = w, r, V, pol_idx, a_curr, z_idx_curr
+        
+        # Adaptive step size (halve on sign flip)
+        if it > 0:
+            if np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            if np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+            
+        last_exc_L, last_exc_K = exc_L, exc_K
+        
+        # Update prices with damping
+        w *= (1 + w_step * exc_L)
+        r += r_step * exc_K
+        
+        # Guard against invalid prices
+        w = max(w, 1e-4)
+        r = max(min(r, 1/beta - 1 - 1e-6), -delta + 1e-6)
+        
+    agg.update({'w':w, 'r':r, 'V':V, 'pol_idx':pol_idx, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr})
     agg['TFP'] = agg['Y'] / max(((agg['K']**alpha) * ((1-agg['share_entre'])**(1-alpha)))**(1-upsilon), 1e-8)
     return agg
 
 def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params, tau_p, tau_m, w_init=0.8, r_init=-0.04, verbose=True):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     w, r = w_init, r_init
-    V = None # Using single V as approximation for seed generation
+    V = None
     resets, shocks = generate_shocks(N_AGENTS, T_SIM_SS, PSI, prob_z)
+    
+    # Adaptive damping state
+    w_step, r_step = 0.2, 0.02
+    last_exc_L, last_exc_K = 0.0, 0.0
+    
     for it in range(100):
-        # We approximate V using expected tau for seed generation
+        # Approximate V with mean tau for initialization efficiency
         tau_avg = np.sum(prob_z * (prob_tau_plus * tau_p + (1-prob_tau_plus) * tau_m))
         inc = precompute_income(a_grid, z_grid, tau_avg, w, r, lam, delta, alpha, upsilon)
         V, pol_idx = solve_value_function(a_grid, z_grid, prob_z, inc, beta, sigma, psi, V_init=V)
-        a_curr, z_idx_curr = np.ones(N_AGENTS) * a_grid[0], np.random.randint(0, len(z_grid), N_AGENTS)
+        
+        a_curr = np.ones(N_AGENTS) * a_grid[0]
+        z_idx_curr = np.random.randint(0, len(z_grid), N_AGENTS)
         tau_curr = np.array([tau_p if np.random.rand() < prob_tau_plus[z_idx_curr[i]] else tau_m for i in range(N_AGENTS)])
         pol_vals = a_grid[pol_idx]
         for t in range(T_SIM_SS):
             a_curr, z_idx_curr = simulate_step(a_curr, z_idx_curr, pol_vals, a_grid, resets[0], shocks[0])
+            
         agg = compute_full_aggregates_with_stats(a_curr, z_idx_curr, tau_curr, z_grid, prob_z, w, r, lam, delta, alpha, upsilon)
-        exc_L, exc_K = agg['L'] - (1-agg['share_entre']), agg['K'] - agg['A']
-        if verbose: print(f"  [Pre SS {it:2d}] w={w:.4f} r={r:.4f} | Ld={agg['L']:.4f} Ls={1-agg['share_entre']:.4f}")
+        
+        exc_L = agg['L'] - (1-agg['share_entre'])
+        exc_K = agg['K'] - agg['A']
+        
+        if verbose: print(f"  [Pre SS {it:2d}] w={w:.6f} r={r:.6f} | Ld={agg['L']:.4f} Ls={1-agg['share_entre']:.4f}")
         if abs(exc_L) < 1e-4 and abs(exc_K) < 1e-4: break
-        w *= (1 + 0.2*exc_L); r += 0.02*exc_K
-    agg['w'], agg['r'], agg['a_sim'], agg['z_idx_sim'], agg['tau_sim'] = w, r, a_curr, z_idx_curr, tau_curr
+        
+        # Adaptive step size
+        if it > 0:
+            if np.sign(exc_L) != np.sign(last_exc_L): w_step *= 0.5
+            if np.sign(exc_K) != np.sign(last_exc_K): r_step *= 0.5
+        
+        last_exc_L, last_exc_K = exc_L, exc_K
+        
+        w *= (1 + w_step * exc_L)
+        r += r_step * exc_K
+        
+        w = max(w, 1e-4)
+        r = max(min(r, 1/beta - 1 - 1e-6), -delta + 1e-6)
+        
+    agg.update({'w':w, 'r':r, 'a_sim':a_curr, 'z_idx_sim':z_idx_curr, 'tau_sim':tau_curr})
     agg['TFP'] = agg['Y'] / max(((agg['K']**alpha) * ((1-agg['share_entre'])**(1-alpha)))**(1-upsilon), 1e-8)
     return agg
 
