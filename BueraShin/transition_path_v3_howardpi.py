@@ -49,7 +49,7 @@ TAU_MINUS = -0.15    # Subsidy rate (negative wedge)
 Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 
 # Grid parameters
-N_A = 501
+N_A = 2001
 A_MIN = 1e-6
 A_MAX = 4000
 
@@ -857,7 +857,7 @@ def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
         w_new = max(0.01, min(2.5, w_new))
         r_new = max(-0.25, min(0.12, r_new))
 
-        damping = 0.5
+        damping = 0.8
         w = damping * w + (1 - damping) * w_new
         r = damping * r + (1 - damping) * r_new
 
@@ -1360,7 +1360,7 @@ def print_summary(pre_eq, post_eq, trans):
 
 def main():
     parser = argparse.ArgumentParser(description='Buera & Shin Transition (Howard PI)')
-    parser.add_argument('--T', type=int, default=250, help='Transition horizon')
+    parser.add_argument('--T', type=int, default=125, help='Transition horizon')
     parser.add_argument('--na', type=int, default=N_A, help='Asset grid points')
     parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory')
     args = parser.parse_args()
