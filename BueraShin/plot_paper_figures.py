@@ -200,7 +200,26 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     
     # Helper to standardize subplots
     def style_subplot(ax, x, y, title, ylabel=None):
-        ax.plot(x, y, color='#2C3E50', linewidth=3.0)
+        # Split data at t=0 to create a visual "jump"
+        mask_pre = x < 0
+        mask_post = x >= 0
+        
+        # Plot Pre-segment
+        if np.any(mask_pre):
+            ax.plot(x[mask_pre], y[mask_pre], color='#2C3E50', linewidth=3.0)
+            
+        # Plot Post-segment
+        if np.any(mask_post):
+            ax.plot(x[mask_post], y[mask_post], color='#2C3E50', linewidth=3.0)
+            
+        # Optional: Connect them with a thin vertical-ish dotted line?
+        # User asked for "jump in the solid line", breaking it is the clearest way.
+        
+        # Reference line at 1.0 (since most are normalized to 1)
+        # Check if values are near 1
+        if np.abs(np.mean(y) - 1.0) < 0.5:
+             ax.axhline(1.0, color='gray', linestyle=':', linewidth=1.5, alpha=0.8)
+             
         ax.axvline(0, color='gray', linestyle='--', linewidth=1.5, alpha=0.8)
         ax.set_title(title)
         if ylabel: ax.set_ylabel(ylabel)
