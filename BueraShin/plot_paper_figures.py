@@ -180,50 +180,60 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     w_plot = np.zeros(n_win)
     r_plot = np.zeros(n_win)
     
+    # Populate ALL plotting arrays
+    for i, tt in enumerate(t_win):
+        if tt < 0:
+            Y_plot[i] = pre_Y
+            K_plot[i] = pre_K
+            TFP_plot[i] = pre_TFP
+            w_plot[i] = pre_w
+            r_plot[i] = pre_r
+        else:
+            if tt < len(t):
+                Y_plot[i] = data['Y'][tt]
+                K_plot[i] = data['K'][tt]
+                TFP_plot[i] = data['TFP'][tt]
+                w_plot[i] = data['w'][tt]
+                r_plot[i] = data['r'][tt]
+            else:
+                Y_plot[i] = data['Y'][-1]
+                K_plot[i] = data['K'][-1]
+                TFP_plot[i] = data['TFP'][-1]
+                w_plot[i] = data['w'][-1]
+                r_plot[i] = data['r'][-1]
+
     # Calculate Investment (Derived)
-    # I_t = K_{t+1} - (1-delta)K_t
-    # In the data, K[t] is capital stock at time t.
-    # So I[t] implies change from K[t] to K[t+1].
-    # We need K_{t+1}. In our saved path, K is likely length T.
-    # We can compute I up to T-1.
-    
-    # Construct full time series for K including pre-ss history
-    # t_win goes from -4 to 20.
-    K_full = np.zeros(n_win + 1) # need one extra for I calculation of last point
-    
-    # Fill K_full
+    # Construct a slightly longer series for K to get K_{t+1} for all points in t_win
+    # We need K values for indices corresponding to t_win[i]+1
+    delta = 0.06 
+    IY_ratio = np.zeros(n_win)
     for i, tt in enumerate(t_win):
-        if tt < 0:
-            K_full[i] = pre_K
+        kt = K_plot[i]
+        # find k_{t+1}
+        tt_next = tt + 1
+        if tt_next < 0:
+            kt_next = pre_K
+        elif tt_next < len(t):
+            kt_next = data['K'][tt_next]
         else:
-            if tt < len(t):
-                K_full[i] = data['K'][tt]
-            else:
-                K_full[i] = data['K'][-1]
-    # Extra point
-    K_full[-1] = K_full[-2] # assume steady state at end
-    
-    delta = 0.06 # Fixed parameter from paper/code
-    I_full = K_full[1:] - (1 - delta) * K_full[:-1]
-    
-    # We also need Y for I/Y
-    Y_full = np.zeros(n_win)
-    for i, tt in enumerate(t_win):
-        if tt < 0:
-            Y_full[i] = pre_Y
-        else:
-            if tt < len(t):
-                Y_full[i] = data['Y'][tt]
-            else:
-                Y_full[i] = data['Y'][-1]
-                
-    IY_ratio = I_full / Y_full
-    
+            kt_next = data['K'][-1]
+        
+        it = kt_next - (1-delta)*kt
+        IY_ratio[i] = it / Y_plot[i] if Y_plot[i] != 0 else 0
+
     # Pre-reform I/Y
     IY_pre = (pre_K - (1-delta)*pre_K) / pre_Y # = delta * K / Y
     
     # Deviation from pre-reform level
     IY_dev = IY_ratio - IY_pre
+
+    # Normalize others
+    Y_n = Y_plot / pre_Y
+    K_n = K_plot / pre_K
+    TFP_n = TFP_plot / pre_TFP
+    w_n = w_plot / pre_w
+    # Interest rate: Levels (not ratio)
+    r_level = r_plot
 
     # Normalize others
     Y_n = Y_plot / pre_Y
@@ -302,9 +312,91 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     plt.close()
     print(f"Generated: {save_path}")
 
+def plot_wealth_distribution(steady_states_path, outdir):
+    if not os.path.exists(steady_states_path):
+        print(f"File not found: {steady_states_path}")
+        return
+
+    data = np.load(steady_states_path)
+    a_grid = data['a_grid']
+    
+    # Post-Reform Distribution
+    # post_mu is (na, nz)
+    post_mu = data['post_mu']
+    # Marginal distribution over assets (sum over z)
+    post_mass_a = np.sum(post_mu, axis=1) # (na,)
+    
+    # Pre-Reform Distribution
+    # pre_mu_p and pre_mu_m are (na, nz)
+    pre_mu_p = data['pre_mu_p']
+    pre_mu_m = data['pre_mu_m']
+    # Total pre mass
+    pre_mass_a = np.sum(pre_mu_p, axis=1) + np.sum(pre_mu_m, axis=1)
+    
+    # Normalize (just in case)
+    post_mass_a /= np.sum(post_mass_a)
+    pre_mass_a /= np.sum(pre_mass_a)
+    
+    # Compute CDFs
+    post_cdf = np.cumsum(post_mass_a)
+    pre_cdf = np.cumsum(pre_mass_a)
+    
+    # Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # 1. ACTUAL HISTOGRAM
+    # We have mu(na, nz). We aggregate over nz to get mu(na).
+    # Then we "sample" from the grid points using these probabilities
+    # to feed into plt.hist.
+    
+    def get_distribution_samples(mass, grid, n_samples=50000):
+        # mass is the probability at each grid point
+        # grid is the value at each grid point
+        return np.random.choice(grid, size=n_samples, p=mass)
+
+    # Sample from distributions
+    pre_samples = get_distribution_samples(pre_mass_a, a_grid)
+    post_samples = get_distribution_samples(post_mass_a, a_grid)
+
+    ax = axes[0]
+    # We use a shared set of bins for comparison
+    bins = np.linspace(0, 50, 60) # focused on wealth below 50
+    
+    # Plot Histograms
+    ax.hist(pre_samples, bins=bins, color='gray', alpha=0.4, label='Pre-Reform', density=True)
+    ax.hist(post_samples, bins=bins, histtype='step', color='black', linewidth=3, label='Post-Reform', density=True)
+    
+    ax.set_title("Asset Distribution (Histogram)")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Density")
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.set_xlim(0, 50)
+    
+    # 2. Lorenz Curve / CDF zoom
+    ax = axes[1]
+    ax.plot(a_grid, pre_cdf, color='gray', linestyle='--', linewidth=2, label='Pre-Reform CDF')
+    ax.plot(a_grid, post_cdf, color='black', linestyle='-', linewidth=2, label='Post-Reform CDF')
+    ax.set_title("Asset CDF")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Cumulative Probability")
+    ax.set_xlim(0, 100) # Zoom to see differences at bottom/middle
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.grid(True, linestyle=':', alpha=0.3)
+    
+    plt.tight_layout()
+    save_path = os.path.join(outdir, "fig_wealth_distribution.pdf")
+    plt.savefig(save_path)
+    plt.savefig(save_path.replace('.pdf', '.png'))
+    plt.close()
+    print(f"Generated: {save_path}")
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=str, default="outputs_finall", help="Directory containing .npz files")
+    parser.add_argument("--out", type=str, default="outputs_final", help="Directory containing .npz files")
     args = parser.parse_args()
 
     print(f"Generating fancy plots from: {args.out}")
@@ -313,6 +405,7 @@ def main():
     trans_path = os.path.join(args.out, "transition_path.npz")
     
     plot_policy_functions(steady_path, args.out)
+    plot_wealth_distribution(steady_path, args.out)
     plot_transition_dynamics(trans_path, args.out)
 
 if __name__ == "__main__":
