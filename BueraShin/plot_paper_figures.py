@@ -157,6 +157,22 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     pre_w = data['pre_w']
     pre_r = data['pre_r']
     
+    print(f"DEBUG: Loaded Data from {transition_path}")
+    print(f"DEBUG: pre_Y={pre_Y:.4f}, pre_K={pre_K:.4f}")
+    if len(data['Y']) > 0:
+        Y0 = data['Y'][0]
+        K0 = data['K'][0]
+        Y_n0 = Y0 / pre_Y if pre_Y != 0 else 0
+        print(f"DEBUG: Y[0]={Y0:.4f}, K[0]={K0:.4f}")
+        print(f"DEBUG: Y_norm[0]={Y_n0:.4f}")
+        
+        if Y_n0 < 0.1:
+            print("\n" + "!"*60)
+            print("WARNING: Normalized GDP is near ZERO.")
+            print(f"This implies Y[0] ({Y0:.4f}) is much smaller than pre_Y ({pre_Y:.4f}).")
+            print("Check if pre_Y is artificially large (e.g. infinite lambda artifact?)")
+            print("!"*60 + "\n")
+    
     # Arrays to plot
     Y_plot = np.zeros(n_win)
     K_plot = np.zeros(n_win)
@@ -164,100 +180,123 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     w_plot = np.zeros(n_win)
     r_plot = np.zeros(n_win)
     
+    # Calculate Investment (Derived)
+    # I_t = K_{t+1} - (1-delta)K_t
+    # In the data, K[t] is capital stock at time t.
+    # So I[t] implies change from K[t] to K[t+1].
+    # We need K_{t+1}. In our saved path, K is likely length T.
+    # We can compute I up to T-1.
+    
+    # Construct full time series for K including pre-ss history
+    # t_win goes from -4 to 20.
+    K_full = np.zeros(n_win + 1) # need one extra for I calculation of last point
+    
+    # Fill K_full
     for i, tt in enumerate(t_win):
         if tt < 0:
-            Y_plot[i] = pre_Y
-            K_plot[i] = pre_K
-            TFP_plot[i] = pre_TFP
-            w_plot[i] = pre_w
-            r_plot[i] = pre_r
+            K_full[i] = pre_K
         else:
-            # tt is index if t starts at 0
             if tt < len(t):
-                Y_plot[i] = data['Y'][tt]
-                K_plot[i] = data['K'][tt]
-                TFP_plot[i] = data['TFP'][tt]
-                w_plot[i] = data['w'][tt]
-                r_plot[i] = data['r'][tt]
+                K_full[i] = data['K'][tt]
             else:
-                # Out of bounds (shouldn't happen with default settings)
-                Y_plot[i] = data['Y'][-1]
-                K_plot[i] = data['K'][-1]
-                TFP_plot[i] = data['TFP'][-1]
-                w_plot[i] = data['w'][-1]
-                r_plot[i] = data['r'][-1]
+                K_full[i] = data['K'][-1]
+    # Extra point
+    K_full[-1] = K_full[-2] # assume steady state at end
+    
+    delta = 0.06 # Fixed parameter from paper/code
+    I_full = K_full[1:] - (1 - delta) * K_full[:-1]
+    
+    # We also need Y for I/Y
+    Y_full = np.zeros(n_win)
+    for i, tt in enumerate(t_win):
+        if tt < 0:
+            Y_full[i] = pre_Y
+        else:
+            if tt < len(t):
+                Y_full[i] = data['Y'][tt]
+            else:
+                Y_full[i] = data['Y'][-1]
+                
+    IY_ratio = I_full / Y_full
+    
+    # Pre-reform I/Y
+    IY_pre = (pre_K - (1-delta)*pre_K) / pre_Y # = delta * K / Y
+    
+    # Deviation from pre-reform level
+    IY_dev = IY_ratio - IY_pre
 
-    # Normalize
+    # Normalize others
     Y_n = Y_plot / pre_Y
     K_n = K_plot / pre_K
     TFP_n = TFP_plot / pre_TFP
     w_n = w_plot / pre_w
-    # Interest rate: gross rate ratio
-    r_n = (1.0 + r_plot) / (1.0 + pre_r)
+    # Interest rate: Levels (not ratio)
+    r_level = r_plot
 
-    # Plotting
+    # Layout: 5 panels like paper (Fig 3 top row, Fig 4 bottom row)
+    # Row 1: GDP, TFP, Investment Rate
+    # Row 2: Capital, Interest Rate, (Blank or Wage)
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
     
     # Helper to standardize subplots
-    def style_subplot(ax, x, y, title, ylabel=None):
-        # Split data at t=0 to create a visual "jump"
+    def style_subplot(ax, x, y, title, ylabel=None, is_level=False):
+        # Split data at t=0
         mask_pre = x < 0
         mask_post = x >= 0
         
-        # Plot Pre-segment
+        # Style: Black solid line only
         if np.any(mask_pre):
-            ax.plot(x[mask_pre], y[mask_pre], color='#2C3E50', linewidth=3.0)
+            ax.plot(x[mask_pre], y[mask_pre], color='black', linewidth=3.0)
             
-        # Plot Post-segment
         if np.any(mask_post):
-            ax.plot(x[mask_post], y[mask_post], color='#2C3E50', linewidth=3.0)
-            
-        # Optional: Connect them with a thin vertical-ish dotted line?
-        # User asked for "jump in the solid line", breaking it is the clearest way.
-        
-        # Reference line at 1.0 (since most are normalized to 1)
-        # Check if values are near 1
-        if np.abs(np.mean(y) - 1.0) < 0.5:
-             ax.axhline(1.0, color='gray', linestyle=':', linewidth=1.5, alpha=0.8)
+            ax.plot(x[mask_post], y[mask_post], color='black', linewidth=3.0)
              
-        ax.axvline(0, color='gray', linestyle='--', linewidth=1.5, alpha=0.8)
-        ax.set_title(title)
-        if ylabel: ax.set_ylabel(ylabel)
-        ax.spines['right'].set_visible(False)
-        ax.spines['top'].set_visible(False)
-        ax.grid(True, linestyle=':', alpha=0.4)
-
-    style_subplot(axes[0,0], t_win, Y_n, "Output (Y)", "Relative to Pre-Reform")
-    style_subplot(axes[0,1], t_win, TFP_n, "TFP", "Relative to Pre-Reform")
-    style_subplot(axes[0,2], t_win, K_n, "Capital (K)", "Relative to Pre-Reform")
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=1.0) # Paper has solid vertical line
+        
+        # Reference line (y=1 for normalized, y=0 for devs, or pre-level)
+        if not is_level:
+             # Check if deviations (mean near 0) or normalized (mean near 1)
+             if np.abs(np.mean(y[:3])) < 0.1: # Likely deviation
+                 ax.axhline(0.0, color='gray', linestyle='-', linewidth=0.5)
+             else:
+                 ax.axhline(1.0, color='gray', linestyle='-', linewidth=0.5)
+        
+        ax.set_title(title, fontsize=14)
+        if ylabel: ax.set_ylabel(ylabel, fontsize=12)
+        
+        # Ticks inward
+        ax.tick_params(direction='in', length=5)
+        
+        # Box frame like the paper (ticks on all sides? Paper has box)
+        # But QJE style usually despine top/right.
+        # The user image shows box plots (ticks on top/right but no labels).
+        # Let's keep typical clean style but maybe enabling top/right spines if desired.
+        # Sticking to current clean looks.
+        ax.spines['right'].set_visible(True)
+        ax.spines['top'].set_visible(True)
+        ax.xaxis.set_ticks_position('both')
+        ax.yaxis.set_ticks_position('both')
+        
+    style_subplot(axes[0,0], t_win, Y_n, "GDP (normalized)")
+    style_subplot(axes[0,1], t_win, TFP_n, "TFP Measure (normalized)")
+    style_subplot(axes[0,2], t_win, IY_dev, "Investment Rate (deviation from Pre-SS)")
     
-    style_subplot(axes[1,0], t_win, w_n, "Wage (w)", "Relative to Pre-Reform")
-    style_subplot(axes[1,1], t_win, r_n, "Interest Rate (1+r)", "Ratio (1+r)/(1+r_pre)")
+    style_subplot(axes[1,0], t_win, K_n, "Capital Stock (normalized)")
+    style_subplot(axes[1,1], t_win, r_level, "Interest Rates (Level)", is_level=True)
     
-    # Excess Demand (Absolute)
-    # Reconstruct full ED vectors
-    ED_L_full = np.zeros(n_win)
-    ED_K_full = np.zeros(n_win)
-    for i, tt in enumerate(t_win):
-        if tt >= 0 and tt < len(t):
-            ED_L_full[i] = data['ED_L'][tt]
-            ED_K_full[i] = data['ED_K'][tt]
-            
-    axes[1,2].plot(t_win, np.abs(ED_L_full), label='Labor Market', color='#E67E22', linewidth=2.5)
-    axes[1,2].plot(t_win, np.abs(ED_K_full), label='Capital Market', color='#8E44AD', linewidth=2.5)
-    axes[1,2].axvline(0, color='gray', linestyle='--', linewidth=1.5, alpha=0.8)
-    axes[1,2].set_title("Market Clearing Errors (Abs)")
-    axes[1,2].legend(frameon=False)
-    axes[1,2].spines['right'].set_visible(False)
-    axes[1,2].spines['top'].set_visible(False)
-    axes[1,2].grid(True, linestyle=':', alpha=0.4)
+    # Wage or unused
+    # style_subplot(axes[1,2], t_win, w_n, "Wage (normalized)")
+    # Keep it blank or put Wage
+    axes[1,2].axis('off') # Remove 6th plot if not needed, paper implies 5 panels in description
 
     # Common X label
     for ax in axes.flat:
-        ax.set_xlabel("Time Periods")
+        if ax.get_visible():
+            ax.set_xlabel("Years after reform")
+            ax.set_xlim(-4, 20)
 
     plt.tight_layout()
-    save_path = os.path.join(outdir, "fig_transition_dynamics.pdf")
+    save_path = os.path.join(outdir, "fig_paper_replication.pdf")
     plt.savefig(save_path)
     plt.savefig(save_path.replace('.pdf', '.png'))
     plt.close()
