@@ -38,6 +38,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from numba import njit, prange
 import warnings
+import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
@@ -1268,181 +1269,92 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
                 ED_L=ED_L, ED_K=ED_K)
 
 # =============================================================================
-# Plotting: t=-4..+20, normalize by pre-SS
+# Data Saving
 # =============================================================================
-def plot_window(pre_eq, post_eq, trans, outdir, tmin=-4, tmax=20):
+def plot_asset_grid_distribution(a_grid, outdir):
+    """
+    Plots the distribution of asset grid points to visualize the power spacing.
+    """
     os.makedirs(outdir, exist_ok=True)
-
-    # build window timeline
-    t_win = np.arange(tmin, tmax + 1)
-    n_win = len(t_win)
-
-    # arrays
-    Y = np.empty(n_win)
-    K = np.empty(n_win)
-    TFP = np.empty(n_win)
-    w = np.empty(n_win)
-    r = np.empty(n_win)
-    ED_L = np.empty(n_win)
-    ED_K = np.empty(n_win)
-
-    # pre values for t<0
-    Y_pre = pre_eq["Y"]
-    K_pre = pre_eq["K"]
-    w_pre = pre_eq["w"]
-    r_pre = pre_eq["r"]
-    TFP_pre = pre_eq["TFP"]
-
-    for i, tt in enumerate(t_win):
-        if tt < 0:
-            Y[i] = Y_pre
-            K[i] = K_pre
-            TFP[i] = TFP_pre
-            w[i] = w_pre
-            r[i] = r_pre
-            ED_L[i] = 0.0
-            ED_K[i] = 0.0
-        else:
-            Y[i] = trans["Y"][tt]
-            K[i] = trans["K"][tt]
-            TFP[i] = trans["TFP"][tt]
-            w[i] = trans["w"][tt]
-            r[i] = trans["r"][tt]
-            ED_L[i] = trans["ED_L"][tt]
-            ED_K[i] = trans["ED_K"][tt]
-
-    # normalization
-    Y_n = Y / Y_pre
-    K_n = K / K_pre
-    TFP_n = TFP / TFP_pre
-    w_n = w / w_pre
-
-    # interest normalization: (1+r)/(1+r_pre)
-    r_n = (1.0 + r) / (1.0 + r_pre)
-
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-
-    axes[0,0].plot(t_win, Y_n)
-    axes[0,0].axvline(0, linestyle="--", linewidth=1)
-    axes[0,0].set_title("Output (Y) / pre-SS")
-    axes[0,0].grid(True, alpha=0.3)
-
-    axes[0,1].plot(t_win, TFP_n)
-    axes[0,1].axvline(0, linestyle="--", linewidth=1)
-    axes[0,1].set_title("TFP / pre-SS")
-    axes[0,1].grid(True, alpha=0.3)
-
-    axes[0,2].plot(t_win, K_n)
-    axes[0,2].axvline(0, linestyle="--", linewidth=1)
-    axes[0,2].set_title("Capital (K) / pre-SS")
-    axes[0,2].grid(True, alpha=0.3)
-
-    axes[1,0].plot(t_win, w_n)
-    axes[1,0].axvline(0, linestyle="--", linewidth=1)
-    axes[1,0].set_title("Wage (w) / pre-SS")
-    axes[1,0].grid(True, alpha=0.3)
-
-    axes[1,1].plot(t_win, r_n)
-    axes[1,1].axvline(0, linestyle="--", linewidth=1)
-    axes[1,1].set_title("(1+r) / (1+r_pre)")
-    axes[1,1].grid(True, alpha=0.3)
-
-    axes[1,2].plot(t_win, np.abs(ED_L), label="|ED_L|")
-    axes[1,2].plot(t_win, np.abs(ED_K), label="|ED_K|")
-    axes[1,2].axvline(0, linestyle="--", linewidth=1)
-    axes[1,2].set_title("Excess demand (abs)")
-    axes[1,2].legend()
-    axes[1,2].grid(True, alpha=0.3)
-
-    for ax in axes.flat:
-        ax.set_xlabel("t")
-
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 1. Index vs Value (Shows the curvature/power function)
+    ax1.plot(np.arange(len(a_grid)), a_grid, 'b.-', markersize=3)
+    ax1.set_title("Grid Spacing: Index vs Value")
+    ax1.set_xlabel("Grid Index i")
+    ax1.set_ylabel("Asset Value a[i]")
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Histogram of point density (log scale to see small bins)
+    # or just plotting the points on a line
+    ax2.scatter(a_grid, np.zeros_like(a_grid), alpha=0.5, s=10, marker='|')
+    ax2.set_title("Grid Point Locations (Density)")
+    ax2.set_xlabel("Asset Value a")
+    ax2.set_yticks([])
+    ax2.set_xlim(0, 50) # Zoom in on the bottom end where density is high
+    ax2.text(0.95, 0.95, "Zoomed to a < 50", transform=ax2.transAxes, ha='right', va='top')
+    
     plt.tight_layout()
-    path = os.path.join(outdir, "transition_B2_window.png")
-    plt.savefig(path, dpi=200)
+    path = os.path.join(outdir, "asset_grid_distribution.png")
+    plt.savefig(path, dpi=150)
     plt.close()
-    print(f"Saved plot: {path}")
+    print(f"Saved grid distribution plot: {path}")
 
-def plot_policy_comparison(pre_eq, post_eq, a_grid, z_grid, outdir):
+def save_steady_states(pre_eq, post_eq, a_grid, z_grid, outdir):
     """
-    Plots policy functions a'(a) for Pre-SS and Post-SS side-by-side.
-    Style: Thick lines, large fonts, QJE-like aesthetics.
+    Saves steady state results immediately (for policy plotting).
     """
-    # Styling context
-    with plt.rc_context({
-        'axes.linewidth': 1.5,
-        'axes.titlesize': 16,
-        'axes.labelsize': 16,
-        'lines.linewidth': 2.5,
-        'xtick.labelsize': 14,
-        'ytick.labelsize': 14,
-        'xtick.major.size': 6,
-        'ytick.major.size': 6,
-        'legend.fontsize': 14,
-        'font.family': 'serif',
-        'font.serif': ['Times New Roman', 'DejaVu Serif']
-    }):
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "steady_states.npz")
+    
+    # Extract policies (unpack dictionaries if needed or save whole dict)
+    # We save specific arrays needed for plotting
+    np.savez_compressed(path,
+                        # Grids
+                        a_grid=a_grid,
+                        z_grid=z_grid,
+                        # Post-Reform
+                        post_w=post_eq['w'],
+                        post_r=post_eq['r'],
+                        post_pol=post_eq['pol'], # indices
+                        post_mu=post_eq['mu'],
+                        # Pre-Reform
+                        pre_w=pre_eq['w'],
+                        pre_r=pre_eq['r'],
+                        pre_polp=pre_eq['polp'],
+                        pre_polm=pre_eq['polm'],
+                        pre_mu_p=pre_eq['mu_p'],
+                        pre_mu_m=pre_eq['mu_m']
+                        )
+    print(f"Saved steady state results to: {path}")
 
-        # Indices for High and Median ability
-        idx_high = len(z_grid) - 1
-        idx_med  = len(z_grid) // 2
-
-        z_high_val = z_grid[idx_high]
-        z_med_val  = z_grid[idx_med]
-
-        # Max asset to plot (zoom in a bit, maybe 200 or 300 like the paper image)
-        # The paper image shows 0..180 or so.
-        # Our amax is 300 by default (args). Let's plot up to 200 for clarity unless a_grid is small.
-        limit_a = 200.0
-        mask = a_grid <= limit_a
-        ag = a_grid[mask]
-        
-        # --- Left: Pre-Reform (Distorted) ---
-        # We use polp (policy under TAU_PLUS) as the representative "distorted" policy
-        # or we could plot both. Let's stick to TAU_PLUS as the "taxed" state usually.
-        polp = pre_eq['polp']
-        # Extract slices in levels
-        pol_high_pre = a_grid[polp[:, idx_high]][mask]
-        pol_med_pre  = a_grid[polp[:, idx_med]][mask]
-
-        ax = axes[0]
-        ax.plot(ag, pol_high_pre, color='red', linestyle='-', label=f'High z ({z_high_val:.1f})')
-        ax.plot(ag, pol_med_pre,  color='blue', linestyle='--', label=f'Median z ({z_med_val:.1f})')
-        ax.plot(ag, ag, color='gray', linestyle=':', linewidth=2.0) # 45 degree
-        
-        ax.set_title("Pre-Reform Steady State")
-        ax.set_xlabel(r"Current Assets $a$")
-        ax.set_ylabel(r"Next Period Assets $a'$")
-        ax.set_xlim(0, limit_a)
-        ax.set_ylim(0, limit_a)
-        
-        # Add text like the image? "e^v = ..."
-        # calculate mean income or something? No, just legend is fine.
-        ax.legend(frameon=False, loc='upper left')
-
-        # --- Right: Post-Reform (Undistorted) ---
-        pol = post_eq['pol']
-        pol_high_post = a_grid[pol[:, idx_high]][mask]
-        pol_med_post  = a_grid[pol[:, idx_med]][mask]
-
-        ax = axes[1]
-        ax.plot(ag, pol_high_post, color='red', linestyle='-', label=f'High z ({z_high_val:.1f})')
-        ax.plot(ag, pol_med_post,  color='blue', linestyle='--', label=f'Median z ({z_med_val:.1f})')
-        ax.plot(ag, ag, color='gray', linestyle=':', linewidth=2.0) # 45 degree
-
-        ax.set_title("Post-Reform Steady State")
-        ax.set_xlabel(r"Current Assets $a$")
-        # ax.set_ylabel(r"Next Period Assets $a'$") # redundant on right
-        ax.set_xlim(0, limit_a)
-        ax.set_ylim(0, limit_a)
-        ax.legend(frameon=False, loc='upper left')
-
-        plt.tight_layout()
-        path = os.path.join(outdir, "policy_functions_QJE.png")
-        plt.savefig(path, dpi=300)
-        plt.close()
-        print(f"Saved plot: {path}")
+def save_transition_path(trans, pre_eq, post_eq, outdir):
+    """
+    Saves transition path simulation results.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "transition_path.npz")
+    
+    np.savez_compressed(path,
+                        t=trans['t'],
+                        Y=trans['Y'],
+                        K=trans['K'],
+                        L=trans['L'],
+                        TFP=trans['TFP'],
+                        w=trans['w'],
+                        r=trans['r'],
+                        ED_L=trans['ED_L'],
+                        ED_K=trans['ED_K'],
+                        # Save pre-SS levels for normalization
+                        pre_Y=pre_eq['Y'],
+                        pre_K=pre_eq['K'],
+                        pre_L=pre_eq['L'],
+                        pre_TFP=pre_eq['TFP'],
+                        pre_w=pre_eq['w'],
+                        pre_r=pre_eq['r'],
+                        )
+    print(f"Saved transition path results to: {path}")
 
 # =============================================================================
 # Main
@@ -1466,6 +1378,9 @@ def main():
     a_grid = create_asset_grid(args.na, 1e-10, args.amax, power=2.0)
     prob_tau_plus = compute_tau_probs(z_grid, Q_DIST)
 
+    # Plot grid immediately
+    plot_asset_grid_distribution(a_grid, args.out)
+
     print("\nSTEP 1: Post-reform steady state (no distortions)")
     post = steady_state_post(a_grid, z_grid, prob_z, N=args.N, burn=args.burn, verbose=verbose)
     print(f"Post SS: w={post['w']:.6f}, r={post['r']:.6f}, ED check: |K-A|={abs(post['K']-post['A']):.3e}\n")
@@ -1474,12 +1389,10 @@ def main():
     pre = steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N=args.N, burn=args.burn, verbose=verbose)
     print(f"Pre  SS: w={pre['w']:.6f}, r={pre['r']:.6f}, ED check approx: |K-A|={abs(pre['K']-pre['A']):.3e}\n")
 
-    print("STEP 3: Transition path via Appendix Algorithm B.2 (reform at t=0)")
-    
-    # Plot policy functions immediately before transition
-    print("Plotting policy functions...")
-    plot_policy_comparison(pre, post, a_grid, z_grid, outdir=args.out)
+    # Save steady states immediately as requested
+    save_steady_states(pre, post, a_grid, z_grid, args.out)
 
+    print("STEP 3: Transition path via Appendix Algorithm B.2 (reform at t=0)")
     trans = solve_transition_B2(pre, post, a_grid, z_grid, prob_z, T=args.T, N=args.N, verbose=verbose)
 
     # final diagnostics
@@ -1487,8 +1400,8 @@ def main():
     max_edK = float(np.max(np.abs(trans["ED_K"])))
     print(f"Transition diagnostics: max|ED_L|={max_edL:.3e}, max|ED_K|={max_edK:.3e}")
 
-    # plot window -4..+20
-    plot_window(pre, post, trans, outdir=args.out, tmin=-4, tmax=20)
+    # Save transition results
+    save_transition_path(trans, pre, post, args.out)
 
 if __name__ == "__main__":
     main()
