@@ -1,0 +1,122 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\geometry{a4paper, margin=1in}
+
+\title{Mathematical Foundations of the Buera \& Shin (2013) \\ Spectral Time Iteration Implementation}
+\author{Piero De Dominicis \\ Bocconi University}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{The Economic Environment}
+The economy is populated by a continuum of agents who choose to be either workers or entrepreneurs. Agents are heterogeneous in their asset holdings $a$ and entrepreneurial ability $z$.
+
+\subsection{Preferences and Shocks}
+Agents maximize expected lifetime utility:
+\begin{equation}
+    \mathbb{E}_0 \sum_{t=0}^{\infty} \beta^t \frac{c_t^{1-\sigma}-1}{1-\sigma}
+\end{equation}
+Entrepreneurial ability $z$ follows a reset process: with probability $\psi$, $z_{t+1} = z_t$; with probability $1-\psi$, a new ability is drawn $z' \sim \pi(z)$ from a Pareto distribution with tail parameter $\eta$. In the pre-reform state, agents also face idiosyncratic output wedges $\tau \in \{\tau^+, \tau^-\}$, where $\mathbb{P}(\tau = \tau^+ | z) = 1 - e^{-q z}$.
+
+\section{Production and Optimal Firm Decisions}
+An entrepreneur with ability $z$ and assets $a$ operates the technology:
+\begin{equation}
+    y = z (k^\alpha l^{1-\alpha})^{1-\nu}
+\end{equation}
+where $\nu$ represents the span-of-control parameter (entrepreneur's share). The entrepreneur faces a collateral constraint $k \leq \lambda a$.
+
+\subsection{Static Profit Maximization}
+The entrepreneur's problem is solved in two stages. First, given capital $k$, the optimal labor $l^*(k, z)$ is found by solving:
+\begin{equation}
+    \max_l \{ z (k^\alpha l^{1-\alpha})^{1-\nu} - w l - (r+\delta) k \}
+\end{equation}
+The first-order condition with respect to $l$ is:
+\begin{equation}
+    (1-\nu)(1-\alpha) z k^{\alpha(1-\nu)} l^{(1-\alpha)(1-\nu)-1} = w
+\end{equation}
+Solving for $l$ yields the conditional labor demand:
+\begin{equation}
+    l^*(k, z) = \left[ \frac{(1-\nu)(1-\alpha) z}{w} \right]^{\frac{1}{1-(1-\alpha)(1-\nu)}} k^{\frac{\alpha(1-\nu)}{1-(1-\alpha)(1-\nu)}}
+\end{equation}
+Substituting $l^*(k, z)$ back into the profit function gives a profit function $\pi(k)$ that is concave in $k$. The unconstrained capital demand $k^{unc}$ satisfies $\pi'(k^{unc}) = r+\delta$. If $k^{unc} > \lambda a$, the entrepreneur is borrowing-constrained and sets $k^* = \lambda a$.
+
+\section{The Recursive Household Problem}
+The agent's state is $(a, z)$. The total income is $i(a, z) = \max\{\pi(a, z, k^*), w\} + (1+r)a$. The Bellman equation is:
+\begin{equation}
+    V(a, z) = \max_{a'} \left\{ \frac{(i(a, z) - a')^{1-\sigma}-1}{1-\sigma} + \beta \text{Cont}(a', z) \right\}
+\end{equation}
+where the continuation value is:
+\begin{equation}
+    \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \int V(a', z') \pi(z') dz'
+\end{equation}
+
+\subsection{The Euler Equation}
+The first-order condition for the optimal savings $a'$ (assuming an interior solution) is given by the Euler equation:
+\begin{equation}
+    c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ]
+\end{equation}
+Defining marginal utility as $MU(a, z) = (i(a, z) - a'(a, z))^{-\sigma}$, the equation becomes:
+\begin{equation}
+    MU(a, z) = \beta (1+r) \left[ \psi MU(a', z) + (1-\psi) \int MU(a', z') \pi(z') dz' \right]
+\end{equation}
+
+\section{Spectral Time Iteration Logic}
+The policy function $a'(a, z)$ is approximated by a bivariate Chebyshev polynomial $\hat{a}(a, z; \bm{C})$.
+
+\subsection{Grid and Mapping}
+Chebyshev polynomials are defined on $x \in [-1, 1]$. We map the state space:
+\begin{enumerate}
+    \item \textbf{Assets}: $x_a = 2 \frac{\ln(a + \text{shift}) - \ln(a_{min} + \text{shift})}{\ln(a_{max} + \text{shift}) - \ln(a_{min} + \text{shift})} - 1$
+    \item \textbf{Ability}: $x_z = 2 \frac{z - z_{min}}{z_{max} - z_{min}} - 1$
+\end{enumerate}
+We choose $N_a$ and $N_z$ nodes in each dimension, resulting in $N = N_a \times N_z$ collocation points.
+
+\subsection{The Iterative Step (Time Iteration)}
+Given a current set of coefficients $\bm{C}^{(n)}$:
+\begin{enumerate}
+    \item \textbf{Expectation Integration}: For each Chebyshev node $(a_i, z_j)$, compute the next-period asset $a' = \hat{a}(a_i, z_j; \bm{C}^{(n)})$.
+    \item \textbf{Marginal Utility at $t+1$}: Evaluate $MU(a', z_k; \bm{C}^{(n)})$ for all $z_k$ in a quadrature grid. The integral is computed as:
+    \begin{equation}
+        \mathbb{E}[MU] = (1-\psi) \sum_k w_k MU(a', z_k; \bm{C}^{(n)}) + \psi MU(a', z_j; \bm{C}^{(n)})
+    \end{equation}
+    \item \textbf{Invert Euler Equation}: Find the target consumption $c^* = [\beta (1+r) \mathbb{E}[MU]]^{-1/\sigma}$.
+    \item \textbf{Compute New Policy}: The target savings is $a^*_{target} = i(a_i, z_j) - c^*$. We apply the constraint $a' = \max\{a_{min}, a^*_{target}\}$.
+    \item \textbf{Update Coefficients}: Solve the linear system $\bm{T} \bm{C}^{(n+1)} = \bm{a}^*$, where $\bm{T}$ is the matrix of Chebyshev polynomials evaluated at the nodes.
+\end{enumerate}
+
+\subsection{Coefficient Transformation}
+The coefficients $\bm{C}$ are related to the values at the collocation nodes $\bm{A}^*$ via the basis matrix $\bm{T}$. Since the bivariate basis is a Kronecker product of the univariate bases $\bm{T} = \bm{T}_z \otimes \bm{T}_a$, the update can be written as:
+\begin{equation}
+    \bm{C}^{(n+1)} = (\bm{T}_z^{-1} \otimes \bm{T}_a^{-1}) \bm{A}^*
+\end{equation}
+In practice, this is solved efficiently using matrix inversions of the smaller univariate matrices.
+
+\section{Coupled Spectral Solver for Distorted Economies}
+In the pre-reform state, agents face idiosyncratic distortions $\tau \in \{\tau^+, \tau^-\}$. The implementation maintains two distinct policy approximations $\hat{a}^+(a, z)$ and $\hat{a}^-(a, z)$.
+
+\subsection{Coupled Euler Equations}
+The Euler equations for the two types are coupled through the ability reset process:
+\begin{equation}
+    MU^\tau(a, z) = \beta (1+r) \left[ \psi MU^\tau(\hat{a}^\tau, z) + (1-\psi) \mathbb{E}_{z'} [ \hat{p}(z') MU^+(\hat{a}^\tau, z') + (1-\hat{p}(z')) MU^-(\hat{a}^\tau, z') ] \right]
+\end{equation}
+where $\hat{p}(z')$ is the probability of drawing the $\tau^+$ distortion conditional on new ability $z'$. This requires a joint iteration on both sets of coefficients until $\bm{C}^+$ and $\bm{C}^-$ stabilize.
+
+\section{Distributional and Transition Dynamics}
+The distribution is tracked on a dense grid using a Markov transition matrix $Q$ derived from the continuous policy $\hat{a}$.
+\begin{equation}
+    \mu_{t+1}(a', z') = \sum_{a, z} \mathbb{P}(a' | a, z) \mathbb{P}(z' | z) \mu_t(a, z)
+\end{equation}
+Aggregate labor $L_t$ and capital $K_t$ are then calculated by summing firm decisions over the distribution $\mu_t$.
+
+\section{Convergence and General Equilibrium}
+The general equilibrium wage $w$ and interest rate $r$ are found by iterating on the price paths using Algorithm B.2. The spectral method’s continuity ensures that the excess demand functions $ED_L(w, r)$ and $ED_K(w, r)$ are smooth, allowing for robust bisection even with a relatively small number of spectral nodes.
+
+\end{document}
