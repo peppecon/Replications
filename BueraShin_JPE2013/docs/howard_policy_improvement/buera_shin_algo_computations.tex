@@ -1,0 +1,170 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{bm}
+\usepackage{xcolor}
+\geometry{a4paper, margin=1in}
+
+\title{Replication of Buera \& Shin (2013) \\ Implementation with Howard Policy Improvement and Histograms}
+\author{Piero De Dominicis \\ Bocconi University}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{The Economic Environment}
+The economy consists of a continuum of infinitely lived agents of measure one. Agents are heterogeneous in their asset holdings $a$ and entrepreneurial ability $z$.
+
+\subsection{Preferences and Shocks}
+Agents maximize expected lifetime utility:
+\begin{equation}
+    U_0 = \mathbb{E}_0 \sum_{t=0}^{\infty} \beta^t \frac{c_t^{1-\sigma}-1}{1-\sigma}
+\end{equation}
+Entrepreneurial ability $z$ follows a reset process. In each period, with probability $\psi$, the ability remains constant: $z_{t+1} = z_t$. With probability $1-\psi$, a new ability is drawn $z' \sim \pi(z)$ from a Pareto distribution:
+\begin{equation}
+    P(Z \leq z) = 1 - z^{-\eta}, \quad z \in [1, \infty)
+\end{equation}
+To simulate distortions in the pre-reform state, agents are subject to idiosyncratic output wedges $\tau \in \{\tau^+, \tau^-\}$. The probability of being in the high-tax state $\tau^+$ is conditional on $z$: $P(\tau = \tau^+ | z) = 1 - e^{-q z}$.
+
+\section{Firm Decisions and Optimal Production}
+Entrepreneurs operate a technology $y = z(k^\alpha l^{1-\alpha})^{1-\nu}$. They face a collateral constraint $k \leq \lambda a$.
+
+\subsection{Analytical Solutions for Firm Decisions}
+Given $(w, r, a, z)$, the entrepreneur's problem is solved in two stages. 
+1. \textbf{Conditional Labor Demand}: For any $k$, the optimal labor $l^*(k, z)$ solves the first-order condition $\partial \pi / \partial l = 0$:
+\begin{equation}
+    l^*(k, z) = \left[ \frac{(1-\nu)(1-\alpha)z}{w} \right]^{\frac{1}{1-(1-\alpha)(1-\nu)}} k^{\frac{\alpha(1-\nu)}{1-(1-\alpha)(1-\nu)}}
+\end{equation}
+2. \textbf{Optimal Capital}: Substituting $l^*$ into the profit function yields a concave function $\pi(k)$. The unconstrained optimal capital $k^{unc}$ is found where $\partial \pi / \partial k = 0$. The actual capital choice is capped by the leverage limit:
+\begin{equation}
+    k^*(a, z) = \min \{ k^{unc}(z, w, r), \lambda a \}
+\end{equation}
+The total income of an agent is $i(a, z; w, r) = \max \{ \pi(a, z, k^*, l^*), w \} + (1+r)a$.
+
+\section{State Space Discretization}
+The state space $\mathcal{A} \times \mathcal{Z}$ is discretized for numerical implementation.
+
+\subsection{Asset Grid}
+To capture the high curvature of the value function near the borrowing constraint, a power-spaced grid for $a \in [a_{min}, a_{max}]$ is used:
+\begin{equation}
+    a_i = a_{min} + (a_{max} - a_{min}) \left( \frac{i}{N_a - 1} \right)^p, \quad i \in \{0, \dots, N_a-1\}
+\end{equation}
+where $p=2$ provides a dense cluster of points at low asset levels.
+
+\subsection{Ability Grid}
+The Pareto distribution $\pi(z)$ is sampled into $N_z$ bins of equal probability. Let $u$ be a uniform random variable. The grid points are midpoints of probability intervals $[F(z_j), F(z_{j+1})]$ where $F$ is the Pareto CDF:
+\begin{equation}
+    z_j = \left( 1 - \bar{u}_j \right)^{-1/\eta}, \quad \bar{u}_j = \frac{j + 0.5}{N_z} \cdot u_{max}
+\end{equation}
+
+\section{Numerical Value Function Iteration}
+The value function $V(a, z)$ is solved on the discretized grid using an optimized iterative process.
+
+\subsection{Initialization}
+The initial guess $V^{(0)}$ is set to the utility of consuming the current income forever at the lowest grid point, providing a stable starting point for the iteration:
+\begin{equation}
+    V^{(0)}(a_i, z_j) = \frac{u(i(a_i, z_j) - a_0)}{1-\beta}
+\end{equation}
+
+\subsection{Expectation Splitting}
+To compute the continuation value $\mathbb{E}[V(a', z') | z]$, the algorithm splits the expectation to exploit the discrete nature of the reset process. Before making decisions, the "reset" expectation $\bar{V}(a')$ is pre-calculated:
+\begin{equation}
+    \bar{V}(a') = \sum_{j} \pi_j V(a', z_j)
+\end{equation}
+The specific continuation value for state $(a, z)$ becomes a weighted average of the current ability's value and the reset value:
+\begin{equation}
+    \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \bar{V}(a')
+\end{equation}
+
+\subsection{Howard Policy Improvement}
+The Bellman operator $T(V)$ is computationally expensive due to the maximization step. Howard's improvement reduces the number of maximizations by iterating on a fixed policy $\sigma(a, z)$.
+\begin{enumerate}
+    \item \textbf{Policy Step}: Solve for $\sigma(a, z) = \arg\max_{a'} \{ u(c) + \beta \text{Cont}(a', z) \}$.
+    \item \textbf{Value Step}: For a fixed $\sigma$, iterate $N_{how}$ times:
+    \begin{equation}
+        V^{(m+1)}(a, z) = u(i(a, z) - \sigma(a, z)) + \beta [\psi V^{(m)}(\sigma(a, z), z) + (1-\psi) \bar{V}^{(m)}(\sigma(a, z))]
+    \end{equation}
+\end{enumerate}
+This significantly speeds up convergence as the Value Step is a linear operation\footnote{In principle, the value of a fixed policy $\sigma$ can be solved in closed form as $V_\sigma = (I - \beta P_\sigma)^{-1} U_\sigma$, where $P_\sigma$ is the transition matrix of the state space. However, for a grid size of $N_a N_z \approx 36,000$, the memory and computational overhead of inverting a $P_\sigma$ matrix with $1.3 \times 10^9$ elements makes the iterative successive approximation approach more efficient in terms of CPU cache and memory.}.
+
+\subsection{\color{blue} Possible Improvements: Continuous Choice via Interpolation}
+{\color{blue}
+A significant enhancement to the discrete grid search is to allow for a continuous asset choice $a' \in [a_{min}, i]$. This is implemented by replacing the discrete maximization with a continuous optimizer and interpolating the continuation value:
+\begin{equation}
+    a^*(a, z) = \arg\max_{a' \in [a_{min}, i]} \left\{ u(i - a') + \beta \mathcal{I}(\text{Cont}, a', z) \right\}
+\end{equation}
+where $\mathcal{I}$ is an interpolating function (e.g., linear or cubic spline). Mathematically, this smooths the aggregate supply and demand functions $K_d(r)$ and $L_d(w)$, eliminating the "step" artifacts inherent in discrete grids and improving the convergence of the bisection algorithms in the general equilibrium solver.
+}
+
+\subsection{Coupled VFI for Distortions}
+In the pre-reform state, the economy features idiosyncratic distortions $\tau \in \{\tau^+, \tau^-\}$. The solver maintains two coupled value functions $V^+(a, z)$ and $V^-(a, z)$. The expectation $\bar{V}(a')$ now accounts for the probability $p(z) = P(\tau = \tau^+ | z)$:
+\begin{equation}
+    \bar{V}(a') = \sum_{j} \pi_j \left[ p(z_j) V^+(a', z_j) + (1-p(z_j)) V^-(a', z_j) \right]
+\end{equation}
+The decision for an agent in state $(a, z, \tau)$ depends on the specific income $i(a, z, \tau)$, but the continuation value uses the shared $\bar{V}(a')$ since $\tau$ is redrawn whenever $z$ resets.
+
+\section{Distributional and Transition Dynamics}
+
+\subsection{Monte Carlo Binned Distribution}
+The distribution $\mu_t(a, z)$ is tracked by simulating $N_{sim}$ agents. At any time $t$, agent $j$ has assets $a_j$. The mass is mapped to the asset grid via linear interpolation weights:
+\begin{equation}
+    \omega_{k+1} = \frac{a_j - a_k}{a_{k+1} - a_k}, \quad \omega_k = 1 - \omega_{k+1}
+\end{equation}
+This allows for calculating aggregate labor demand $L_{d,t}$ and capital demand $K_{d,t}$ as smooth functions of prices:
+\begin{equation}
+    K_{d,t}(w, r) = \sum_{i, j} \mu_t(a_i, z_j) k^*(a_i, z_j, w, r) \bm{1}_{\{\pi > w\}}
+\end{equation}
+
+\section{Algorithm B.2: Nested Price Path Iteration}
+The general equilibrium transition path is computed via Algorithm B.2 (Appendix B.2), which decomposes the market clearing of capital and labor into nested price-path sequences.
+
+\subsection{Price Path Sequences}
+Let $\bm{w} = \{w_t\}_{t=0}^T$ and $\bm{r} = \{r_t\}_{t=0}^T$ be the sequences of wages and interest rates. The algorithm solves for fixed points of these sequences such that markets clear at every $t$.
+
+\subsection{Nested Iteration Structure}
+The implementation uses a nested loop structure:
+\begin{enumerate}
+    \item \textbf{Outer Loop (Interest Rates)}: Updates the guess for the interest rate path $\bm{r}^{(n)}$.
+    \begin{enumerate}
+        \item \textbf{Inner Loop (Wages)}: Given $\bm{r}^{(n)}$, iteratively updates the wage path $\bm{w}^{(k)}$.
+        \begin{enumerate}
+            \item \textbf{Backward Induction}: Solve for policies $a'_t(a, z)$ given $(w_t^{(k)}, r_t^{(n)})$ for $t = T-1, \dots, 0$.
+            \item \textbf{Forward Simulation}: Simulate $N_{sim}$ agents forward from $\mu_0$ using $a'_t$ to obtain the sequence of binned distributions $\{\mu_t\}_{t=0}^T$.
+            \item \textbf{Labor Clearing}: For each $t$, find the wage $w_t^*$ that clears the labor market \textit{given the fixed distribution} $\mu_t$:
+            \begin{equation}
+                L_{excess}(w_t^* | \mu_t, r_t^{(n)}) = 0
+            \end{equation}
+            \item \textbf{Wage Relaxation}: Update the wage path using damping $\eta_w$:
+            \begin{equation}
+                w_t^{(k+1)} = \eta_w w_t^* + (1-\eta_w) w_t^{(k)}
+            \end{equation}
+        \end{enumerate}
+        \item \textbf{Capital Clearing}: For each $t$, find the interest rate $r_t^*$ that clears the capital market given the converged wage and distribution:
+        \begin{equation}
+            K_{excess}(r_t^* | \mu_t, w_t^{(converged)}) = 0
+        \end{equation}
+        \item \textbf{Interest Rate Relaxation}: Update the path using damping $\eta_r$:
+        \begin{equation}
+            r_t^{(n+1)} = \eta_r r_t^* + (1-\eta_r) r_t^{(n)}
+        \end{equation}
+    \end{enumerate}
+\end{enumerate}
+
+\subsection{Numerical Market Clearing (Bisections)}
+The clearing prices $w_t^*$ and $r_t^*$ are found using a robust root-finding method:
+\begin{itemize}
+    \item \textbf{Bracketing Scan}: Before bisecting, the price space $[P_{min}, P_{max}]$ is scanned at $N_{scan}$ points to find a bracket $[a, b]$ where the excess demand function changes sign.
+    \item \textbf{Bisection}: Once a bracket is found, a bisection method converges to the specific clearing price with a tolerance of $10^{-10}$. 
+\end{itemize}
+
+\subsection{Convergence Criteria}
+The algorithm requires two conditions to stop:
+\begin{enumerate}
+    \item \textbf{Sequence Convergence}: The maximum change in price paths between iterations must be small: $\max_t |r_t^{(n+1)} - r_t^{(n)}| < \epsilon_{seq}$.
+    \item \textbf{Market Clearing Gaps}: The actual excess demand residuals (calculated by re-evaluating the economy with the final prices) must satisfy $|ED_L| < \epsilon_{ED}$ and $|ED_K| < \epsilon_{ED}$.
+\end{enumerate}
+
+\end{document}
