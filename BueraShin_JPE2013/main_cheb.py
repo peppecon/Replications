@@ -41,7 +41,8 @@ PSI = 0.894      # Persistence
 A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0  
 # Paper's discretization (v3 bounds): M=0.633 (e ~ 1.2675) and 0.9995 (e ~ 6.2164)
-Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
+# Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
+Z_MIN, Z_MAX = (1 - 0.001)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
 N_CHEBY_A = 20
 N_CHEBY_Z = 20  
 
@@ -174,7 +175,7 @@ def solve_policy_spectral(params, w, r, coeffs_init=None):
     delta, alpha, upsilon, lam, beta, sigma, psi = params
     nodes_a, nodes_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
     T_inv = np.linalg.inv(T_full)
-    M_vals = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
+    M_vals = np.concatenate([np.linspace(0.0001, 0.998, 38), [0.999, 0.9995]])
     z_quad = (1 - M_vals)**(-1/ETA)
     z_w = np.zeros(40)
     z_w[0] = M_vals[0]
@@ -304,7 +305,7 @@ def find_equilibrium(params, method='analytical', fixed_shocks=None, w_init=1.5,
     exc_L_p, exc_K_p = 0.0, 0.0
     na_h, nz_h = 600, 40
     a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
-    M_v = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
+    M_v = np.concatenate([np.linspace(0.0001, 0.998, 38), [0.999, 0.9995]])
     z_h = (1 - M_v)**(-1/ETA)
     pr_z = np.zeros(nz_h); pr_z[0] = M_v[0]; pr_z[1:] = M_v[1:] - M_v[:-1]; pr_z /= pr_z.sum()
     if method == 'simulation':

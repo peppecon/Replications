@@ -52,11 +52,11 @@ TAU_MINUS = -0.15    # Subsidy rate (negative wedge)
 Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 
 # Global Grid Bounds (Spectral)
-A_MIN, A_MAX = 1e-6, 200.0
+A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0
 Z_MIN, Z_MAX = 1.0, (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 15
-N_CHEBY_Z = 15
+N_CHEBY_A = 20
+N_CHEBY_Z = 20
 MAX_ITER_POLICY = 100  # Spectral policy solver max iterations
 
 # =============================================================================
