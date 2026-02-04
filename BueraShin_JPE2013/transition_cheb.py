@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from numba import njit, prange
 from scipy import sparse
 from scipy.sparse.linalg import eigs
+from scipy.optimize import root, least_squares
 import os
 import json
 import argparse
@@ -27,7 +28,7 @@ import warnings
 import time
 
 # Import from the working library (make sure it exists in path)
-from library.functions_library import Chebyshev_Nodes, Chebyshev_Polynomials_Recursion_mv
+from shared_library.functions import Chebyshev_Nodes, Chebyshev_Polynomials_Recursion_mv
 
 warnings.filterwarnings('ignore')
 
@@ -375,6 +376,578 @@ def solve_policy_bivariate_update_with_dist(coeffs_plus, coeffs_minus,
     return T_az_inv @ target_vals
 
 # =============================================================================
+# Newton-Based Policy Solver
+# =============================================================================
+
+@njit(cache=False)
+def euler_residuals_nodist_numba(coeffs, nodes_a, nodes_z,
+                                  beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                  a_min, a_max, z_min, z_max,
+                                  quad_z, quad_w):
+    """
+    Compute Euler equation residuals at all collocation nodes.
+
+    Residual at node i: R_i = u'(c_i) - β(1+r) * E[u'(c'_i)]
+    where c_i = income(a_i, z_i) - a'(a_i, z_i)
+
+    Returns array of residuals (same size as coeffs).
+    """
+    na_c, nz_c = len(nodes_a), len(nodes_z)
+    nt = na_c * nz_c
+    residuals = np.zeros(nt)
+
+    for i_n in range(nt):
+        ia, iz = i_n // nz_c, i_n % nz_c
+        a, z = nodes_a[ia], nodes_z[iz]
+
+        # Current period income
+        p, _, _, _ = solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, nu)
+        inc = max(p, w) + (1 + r) * a
+
+        # Current policy (savings)
+        aprime = bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max)
+        aprime = max(a_min, min(aprime, a_max))
+
+        # Current consumption and marginal utility
+        c = max(inc - aprime, 1e-9)
+        mu_current = c ** (-sigma)
+
+        # Expected marginal utility at (a', z')
+        # With persistence: z' = z with prob psi, z' ~ pi(z) with prob 1-psi
+
+        # Case 1: z' = z (persistence)
+        p_p, _, _, _ = solve_entrepreneur_single(aprime, z, w, r, lam, delta, alpha, nu)
+        inc_p = max(p_p, w) + (1 + r) * aprime
+        app = bivariate_eval(aprime, z, coeffs, a_min, a_max, z_min, z_max)
+        app = max(a_min, min(app, a_max))
+        c_p = max(inc_p - app, 1e-9)
+        mu_pers = c_p ** (-sigma)
+
+        # Case 2: z' ~ pi(z) (reset) - integrate over quad_z
+        e_mu_reset = 0.0
+        for k in range(len(quad_z)):
+            zk = quad_z[k]
+            pk, _, _, _ = solve_entrepreneur_single(aprime, zk, w, r, lam, delta, alpha, nu)
+            inc_k = max(pk, w) + (1 + r) * aprime
+            app_k = bivariate_eval(aprime, zk, coeffs, a_min, a_max, z_min, z_max)
+            app_k = max(a_min, min(app_k, a_max))
+            c_k = max(inc_k - app_k, 1e-9)
+            e_mu_reset += quad_w[k] * (c_k ** (-sigma))
+
+        # Combined expected marginal utility
+        expected_mu = psi * mu_pers + (1 - psi) * e_mu_reset
+
+        # Euler residual: u'(c) - β(1+r)E[u'(c')] = 0
+        residuals[i_n] = mu_current - beta * (1 + r) * expected_mu
+
+    return residuals
+
+
+@njit(cache=False)
+def euler_residuals_scaled_numba(coeffs, nodes_a, nodes_z,
+                                  beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                  a_min, a_max, z_min, z_max,
+                                  quad_z, quad_w):
+    """
+    Compute SCALED Euler equation residuals using log-transform.
+
+    Instead of: u'(c) - β(1+r)E[u'(c')] = 0
+    We solve:   log(u'(c)) - log(β(1+r)E[u'(c')]) = 0
+    Which is:   -σ*log(c) - log(β(1+r)) - log(E[c'^{-σ}]) = 0
+
+    This gives residuals of order O(1) regardless of consumption levels.
+    """
+    na_c, nz_c = len(nodes_a), len(nodes_z)
+    nt = na_c * nz_c
+    residuals = np.zeros(nt)
+    log_discount = np.log(beta * (1 + r))
+
+    for i_n in range(nt):
+        ia, iz = i_n // nz_c, i_n % nz_c
+        a, z = nodes_a[ia], nodes_z[iz]
+
+        # Current period income
+        p, _, _, _ = solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, nu)
+        inc = max(p, w) + (1 + r) * a
+
+        # Current policy (savings)
+        aprime = bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max)
+        aprime = max(a_min, min(aprime, a_max))
+
+        # Current consumption
+        c = max(inc - aprime, 1e-9)
+        log_mu_current = -sigma * np.log(c)
+
+        # Expected marginal utility at (a', z')
+        # Case 1: z' = z (persistence)
+        p_p, _, _, _ = solve_entrepreneur_single(aprime, z, w, r, lam, delta, alpha, nu)
+        inc_p = max(p_p, w) + (1 + r) * aprime
+        app = bivariate_eval(aprime, z, coeffs, a_min, a_max, z_min, z_max)
+        app = max(a_min, min(app, a_max))
+        c_p = max(inc_p - app, 1e-9)
+        mu_pers = c_p ** (-sigma)
+
+        # Case 2: z' ~ pi(z) (reset)
+        e_mu_reset = 0.0
+        for k in range(len(quad_z)):
+            zk = quad_z[k]
+            pk, _, _, _ = solve_entrepreneur_single(aprime, zk, w, r, lam, delta, alpha, nu)
+            inc_k = max(pk, w) + (1 + r) * aprime
+            app_k = bivariate_eval(aprime, zk, coeffs, a_min, a_max, z_min, z_max)
+            app_k = max(a_min, min(app_k, a_max))
+            c_k = max(inc_k - app_k, 1e-9)
+            e_mu_reset += quad_w[k] * (c_k ** (-sigma))
+
+        expected_mu = psi * mu_pers + (1 - psi) * e_mu_reset
+        log_expected_mu = np.log(max(expected_mu, 1e-20))
+
+        # Log-scaled residual
+        residuals[i_n] = log_mu_current - log_discount - log_expected_mu
+
+    return residuals
+
+
+def euler_residuals_wrapper(coeffs_flat, nodes_a, nodes_z, T_mat,
+                            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                            a_min, a_max, z_min, z_max, quad_z, quad_w, use_scaling):
+    """
+    Wrapper for scipy.optimize.root - converts flat coefficients and returns residuals.
+    """
+    coeffs = coeffs_flat.copy()
+    if use_scaling:
+        residuals = euler_residuals_scaled_numba(
+            coeffs, nodes_a, nodes_z,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            a_min, a_max, z_min, z_max, quad_z, quad_w
+        )
+    else:
+        residuals = euler_residuals_nodist_numba(
+            coeffs, nodes_a, nodes_z,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            a_min, a_max, z_min, z_max, quad_z, quad_w
+        )
+    return residuals
+
+
+def solve_policy_newton(params, w, r, nodes_a, nodes_z, T_mat, T_inv, quad_z, quad_w,
+                        coeffs_init=None, tol=1e-8, max_iter=100, verbose=True,
+                        n_picard_warmup=30, use_scaling=True, method='picard_accelerated'):
+    """
+    Solve for optimal policy using various numerical methods.
+
+    Available methods:
+    - 'picard': Pure Picard (fixed-point) iteration with adaptive damping
+    - 'picard_accelerated': Picard with Anderson acceleration
+    - 'hybrid': Picard warmup + Newton refinement
+    - 'least_squares': Levenberg-Marquardt via scipy.optimize.least_squares
+
+    Parameters:
+        params: tuple (delta, alpha, nu, lam, beta, sigma, psi)
+        w, r: prices
+        nodes_a, nodes_z: collocation nodes
+        T_mat: Chebyshev basis matrix at nodes
+        T_inv: inverse of T_mat for coefficient recovery
+        quad_z, quad_w: quadrature nodes and weights for integration
+        coeffs_init: initial guess for coefficients
+        tol: tolerance for residual norm
+        max_iter: maximum iterations
+        verbose: print convergence info
+        n_picard_warmup: number of Picard warmup iterations (for hybrid)
+        use_scaling: if True, use log-scaled residuals
+        method: solver method to use
+
+    Returns:
+        coeffs: converged Chebyshev coefficients
+        success: whether solver converged
+    """
+    delta, alpha, nu, lam, beta, sigma, psi = params
+    nt = len(nodes_a) * len(nodes_z)
+
+    # Initialize coefficients if not provided
+    if coeffs_init is None:
+        seed_vals = np.zeros(nt)
+        idx = 0
+        for ia in range(len(nodes_a)):
+            for iz in range(len(nodes_z)):
+                a, z = nodes_a[ia], nodes_z[iz]
+                p, _, _, _ = solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, nu)
+                inc = max(p, w) + (1 + r) * a
+                seed_vals[idx] = max(A_MIN, min(0.8 * inc, inc - 0.01))
+                idx += 1
+        coeffs = T_inv @ seed_vals
+    else:
+        coeffs = coeffs_init.copy()
+
+    if method == 'picard' or method == 'picard_accelerated':
+        # Pure Picard iteration with adaptive damping
+        if verbose:
+            print(f"      [Picard] Running up to {max_iter} iterations with adaptive damping")
+
+        # Anderson acceleration storage (keep last m iterates)
+        m_anderson = 5 if method == 'picard_accelerated' else 0
+        F_history = []  # Store g(x) - x
+        X_history = []  # Store x
+
+        damping = 0.5
+        best_diff = np.inf
+        stall_count = 0
+
+        for i in range(max_iter):
+            coeffs_new = solve_policy_bivariate_update(
+                coeffs, nodes_a, nodes_z, T_inv,
+                beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+            )
+
+            diff = np.max(np.abs(coeffs_new - coeffs))
+
+            # Adaptive damping
+            if diff < best_diff:
+                best_diff = diff
+                stall_count = 0
+                damping = min(0.8, damping + 0.05)  # Increase damping if improving
+            else:
+                stall_count += 1
+                if stall_count > 3:
+                    damping = max(0.2, damping - 0.1)  # Decrease damping if stalling
+                    stall_count = 0
+
+            if method == 'picard_accelerated' and i > 0:
+                # Anderson acceleration
+                F_k = coeffs_new - coeffs
+                F_history.append(F_k)
+                X_history.append(coeffs.copy())
+
+                if len(F_history) > m_anderson:
+                    F_history.pop(0)
+                    X_history.pop(0)
+
+                if len(F_history) >= 2:
+                    # Solve least squares for mixing coefficients
+                    m_curr = len(F_history)
+                    F_mat = np.column_stack(F_history)
+                    try:
+                        # Solve min ||F_mat @ alpha - F_k||
+                        alpha_coeffs, _, _, _ = np.linalg.lstsq(F_mat[:, :-1] - F_mat[:, -1:],
+                                                                 -F_mat[:, -1], rcond=None)
+                        alpha_coeffs = np.append(alpha_coeffs, 1.0 - np.sum(alpha_coeffs))
+
+                        # Compute accelerated iterate
+                        X_mat = np.column_stack(X_history)
+                        G_mat = X_mat + F_mat  # g(x) = x + (g(x) - x)
+                        coeffs_accel = G_mat @ alpha_coeffs
+
+                        # Use accelerated if it's better
+                        coeffs_test = damping * coeffs_accel + (1 - damping) * coeffs
+                    except:
+                        coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
+                else:
+                    coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
+            else:
+                coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
+
+            coeffs = coeffs_test
+
+            if verbose and i % 10 == 0:
+                print(f"      [Picard] it={i}, diff={diff:.2e}, damping={damping:.2f}")
+
+            if diff < tol:
+                if verbose:
+                    print(f"      [Picard] Converged at iter {i+1}, diff={diff:.2e}")
+                return coeffs, True
+
+        # Check final residual
+        scaled_residuals = euler_residuals_scaled_numba(
+            coeffs, nodes_a, nodes_z,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+        )
+        scaled_norm = np.max(np.abs(scaled_residuals))
+        success = scaled_norm < 0.05  # Relaxed tolerance
+
+        if verbose:
+            status = "CONVERGED" if success else "NOT CONVERGED"
+            print(f"      [Picard] {status}: max|R_scaled|={scaled_norm:.2e}, final diff={diff:.2e}")
+
+        return coeffs, success
+
+    elif method == 'least_squares':
+        # Use scipy.optimize.least_squares (Levenberg-Marquardt)
+        if verbose:
+            print(f"      [LeastSq] Phase 1: {n_picard_warmup} Picard warmup")
+
+        # Picard warmup
+        for i in range(n_picard_warmup):
+            coeffs_new = solve_policy_bivariate_update(
+                coeffs, nodes_a, nodes_z, T_inv,
+                beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+            )
+            diff = np.max(np.abs(coeffs_new - coeffs))
+            coeffs = 0.5 * coeffs + 0.5 * coeffs_new
+            if diff < tol:
+                if verbose:
+                    print(f"      [LeastSq] Converged in warmup at iter {i+1}")
+                return coeffs, True
+
+        if verbose:
+            print(f"      [LeastSq] Phase 2: Levenberg-Marquardt refinement")
+
+        result = least_squares(
+            lambda c: euler_residuals_wrapper(c, nodes_a, nodes_z, T_mat,
+                                              beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                              A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, use_scaling),
+            coeffs,
+            method='lm',
+            ftol=tol,
+            xtol=tol,
+            max_nfev=max_iter * nt
+        )
+
+        scaled_residuals = euler_residuals_scaled_numba(
+            result.x, nodes_a, nodes_z,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+        )
+        scaled_norm = np.max(np.abs(scaled_residuals))
+        success = scaled_norm < 0.05
+
+        if verbose:
+            status = "CONVERGED" if success else "FAILED"
+            print(f"      [LeastSq] {status}: max|R_scaled|={scaled_norm:.2e}, nfev={result.nfev}")
+
+        return result.x, success
+
+    else:  # hybrid (default fallback)
+        if verbose:
+            print(f"      [Hybrid] Phase 1: {n_picard_warmup} Picard warmup iterations")
+
+        for i in range(n_picard_warmup):
+            coeffs_new = solve_policy_bivariate_update(
+                coeffs, nodes_a, nodes_z, T_inv,
+                beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+            )
+            diff = np.max(np.abs(coeffs_new - coeffs))
+            coeffs = 0.5 * coeffs + 0.5 * coeffs_new
+            if diff < tol:
+                if verbose:
+                    print(f"      [Hybrid] Converged in Picard phase at iter {i+1}, diff={diff:.2e}")
+                return coeffs, True
+
+        if verbose:
+            print(f"      [Hybrid] Phase 2: Newton refinement")
+
+        result = root(
+            euler_residuals_wrapper,
+            coeffs,
+            args=(nodes_a, nodes_z, T_mat,
+                  beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                  A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, use_scaling),
+            method='hybr',
+            tol=tol,
+            options={'maxfev': max_iter * nt}
+        )
+
+        scaled_residuals = euler_residuals_scaled_numba(
+            result.x, nodes_a, nodes_z,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
+        )
+        scaled_norm = np.max(np.abs(scaled_residuals))
+        success = result.success and scaled_norm < 0.05
+
+        if verbose:
+            status = "CONVERGED" if success else "FAILED"
+            print(f"      [Hybrid] {status}: max|R_scaled|={scaled_norm:.2e}, nfev={result.nfev}")
+
+        return result.x, success
+
+
+@njit(cache=False)
+def euler_residuals_with_dist_numba(coeffs_plus, coeffs_minus, nodes_a, nodes_z,
+                                     beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                     a_min, a_max, z_min, z_max,
+                                     quad_z, quad_w, prob_tau_plus_arr,
+                                     tau_plus, tau_minus):
+    """
+    Compute Euler equation residuals for BOTH tau states (plus and minus).
+    Returns concatenated residuals: [R_plus, R_minus].
+    """
+    na_c, nz_c = len(nodes_a), len(nodes_z)
+    nt = na_c * nz_c
+    residuals = np.zeros(2 * nt)  # First nt for plus, next nt for minus
+
+    for is_plus in [True, False]:
+        tau_curr = tau_plus if is_plus else tau_minus
+        coeffs_curr = coeffs_plus if is_plus else coeffs_minus
+        offset = 0 if is_plus else nt
+
+        for i_n in range(nt):
+            ia, iz = i_n // nz_c, i_n % nz_c
+            a, z = nodes_a[ia], nodes_z[iz]
+
+            # Current income with distortion
+            p, _, _, _ = solve_entrepreneur_with_tau(a, z, tau_curr, w, r, lam, delta, alpha, nu)
+            inc = max(p, w) + (1 + r) * a
+
+            # Current policy
+            aprime = bivariate_eval(a, z, coeffs_curr, a_min, a_max, z_min, z_max)
+            aprime = max(a_min, min(aprime, a_max))
+
+            # Current consumption and MU
+            c = max(inc - aprime, 1e-9)
+            mu_current = c ** (-sigma)
+
+            # Case 1: z' = z, tau' = tau (persistence)
+            p_p, _, _, _ = solve_entrepreneur_with_tau(aprime, z, tau_curr, w, r, lam, delta, alpha, nu)
+            inc_p = max(p_p, w) + (1 + r) * aprime
+            app = bivariate_eval(aprime, z, coeffs_curr, a_min, a_max, z_min, z_max)
+            app = max(a_min, min(app, a_max))
+            c_p = max(inc_p - app, 1e-9)
+            mu_pers = c_p ** (-sigma)
+
+            # Case 2: z' ~ pi(z), tau' ~ p(z') (reset)
+            e_mu_reset = 0.0
+            for k in range(len(quad_z)):
+                zk = quad_z[k]
+                ptp_k = prob_tau_plus_arr[k]
+
+                # tau_plus branch
+                p_plus, _, _, _ = solve_entrepreneur_with_tau(aprime, zk, tau_plus, w, r, lam, delta, alpha, nu)
+                inc_plus = max(p_plus, w) + (1 + r) * aprime
+                app_plus = bivariate_eval(aprime, zk, coeffs_plus, a_min, a_max, z_min, z_max)
+                app_plus = max(a_min, min(app_plus, a_max))
+                c_plus = max(inc_plus - app_plus, 1e-9)
+                mu_plus = c_plus ** (-sigma)
+
+                # tau_minus branch
+                p_minus, _, _, _ = solve_entrepreneur_with_tau(aprime, zk, tau_minus, w, r, lam, delta, alpha, nu)
+                inc_minus = max(p_minus, w) + (1 + r) * aprime
+                app_minus = bivariate_eval(aprime, zk, coeffs_minus, a_min, a_max, z_min, z_max)
+                app_minus = max(a_min, min(app_minus, a_max))
+                c_minus = max(inc_minus - app_minus, 1e-9)
+                mu_minus = c_minus ** (-sigma)
+
+                e_mu_reset += quad_w[k] * (ptp_k * mu_plus + (1 - ptp_k) * mu_minus)
+
+            expected_mu = psi * mu_pers + (1 - psi) * e_mu_reset
+            residuals[offset + i_n] = mu_current - beta * (1 + r) * expected_mu
+
+    return residuals
+
+
+def euler_residuals_with_dist_wrapper(coeffs_flat, nodes_a, nodes_z, T_mat,
+                                       beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                       a_min, a_max, z_min, z_max, quad_z, quad_w,
+                                       prob_tau_plus_arr, tau_plus, tau_minus):
+    """Wrapper for scipy.optimize.root with distortions."""
+    nt = len(nodes_a) * len(nodes_z)
+    coeffs_plus = coeffs_flat[:nt].copy()
+    coeffs_minus = coeffs_flat[nt:].copy()
+
+    residuals = euler_residuals_with_dist_numba(
+        coeffs_plus, coeffs_minus, nodes_a, nodes_z,
+        beta, sigma, psi, w, r, lam, delta, alpha, nu,
+        a_min, a_max, z_min, z_max, quad_z, quad_w,
+        prob_tau_plus_arr, tau_plus, tau_minus
+    )
+    return residuals
+
+
+def solve_policy_newton_with_dist(params, w, r, nodes_a, nodes_z, T_mat, T_inv,
+                                   quad_z, quad_w, prob_tau_plus_arr,
+                                   coeffs_init=None, tol=1e-8, max_iter=100, verbose=True,
+                                   n_picard_warmup=30, method='picard'):
+    """
+    Solve for optimal policies with distortions.
+
+    For the coupled system with distortions, we use Picard iteration
+    as it's more stable for this more complex problem.
+
+    Returns:
+        coeffs_plus, coeffs_minus: converged coefficients for each tau state
+        success: whether solver converged
+    """
+    delta, alpha, nu, lam, beta, sigma, psi = params
+    nt = len(nodes_a) * len(nodes_z)
+
+    # Initialize if not provided
+    if coeffs_init is None:
+        seed_p = np.zeros(nt)
+        seed_m = np.zeros(nt)
+        idx = 0
+        for ia in range(len(nodes_a)):
+            for iz in range(len(nodes_z)):
+                a, z = nodes_a[ia], nodes_z[iz]
+                pp, _, _, _ = solve_entrepreneur_with_tau(a, z, TAU_PLUS, w, r, lam, delta, alpha, nu)
+                inc_p = max(pp, w) + (1 + r) * a
+                seed_p[idx] = max(A_MIN, min(0.8 * inc_p, inc_p - 0.01))
+                pm, _, _, _ = solve_entrepreneur_with_tau(a, z, TAU_MINUS, w, r, lam, delta, alpha, nu)
+                inc_m = max(pm, w) + (1 + r) * a
+                seed_m[idx] = max(A_MIN, min(0.8 * inc_m, inc_m - 0.01))
+                idx += 1
+        cp = T_inv @ seed_p
+        cm = T_inv @ seed_m
+    else:
+        cp, cm = coeffs_init[0].copy(), coeffs_init[1].copy()
+
+    # Use Picard iteration with adaptive damping for stability
+    if verbose:
+        print(f"      [Picard Dist] Running up to {max_iter} iterations")
+
+    damping = 0.5
+    best_diff = np.inf
+    stall_count = 0
+
+    for i in range(max_iter):
+        # Update both policies
+        cnp = solve_policy_bivariate_update_with_dist(
+            cp, cm, nodes_a, nodes_z, T_inv,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w,
+            prob_tau_plus_arr, TAU_PLUS, TAU_MINUS, True
+        )
+        cnm = solve_policy_bivariate_update_with_dist(
+            cp, cm, nodes_a, nodes_z, T_inv,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w,
+            prob_tau_plus_arr, TAU_PLUS, TAU_MINUS, False
+        )
+
+        diff = max(np.max(np.abs(cnp - cp)), np.max(np.abs(cnm - cm)))
+
+        # Adaptive damping
+        if diff < best_diff:
+            best_diff = diff
+            stall_count = 0
+            damping = min(0.7, damping + 0.03)
+        else:
+            stall_count += 1
+            if stall_count > 3:
+                damping = max(0.2, damping - 0.1)
+                stall_count = 0
+
+        cp = damping * cnp + (1 - damping) * cp
+        cm = damping * cnm + (1 - damping) * cm
+
+        if verbose and i % 10 == 0:
+            print(f"      [Picard Dist] it={i}, diff={diff:.2e}, damping={damping:.2f}")
+
+        if diff < tol:
+            if verbose:
+                print(f"      [Picard Dist] Converged at iter {i+1}, diff={diff:.2e}")
+            return cp, cm, True
+
+    success = best_diff < 0.05
+    if verbose:
+        status = "CONVERGED" if success else "NOT CONVERGED"
+        print(f"      [Picard Dist] {status}: final diff={diff:.2e}")
+
+    return cp, cm, success
+
+
+# =============================================================================
 # Distribution Update
 # =============================================================================
 
@@ -578,7 +1151,17 @@ def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_
     mu_f = mu.reshape((na, nz, 2))
     return mu_f[:,:,0], mu_f[:,:,1]
 
-def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post"):
+def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post", use_newton=True):
+    """
+    Find stationary equilibrium using nested price clearing.
+
+    Parameters:
+        params: tuple (delta, alpha, nu, lam, beta, sigma, psi)
+        distortions: if True, solve pre-reform economy with tau distortions
+        diag_out: dictionary for convergence diagnostics
+        label: label for printing and diagnostics
+        use_newton: if True, use Newton solver; else use Picard iteration
+    """
     delta, alpha, nu, lam, beta, sigma, psi = params
     na_h = 600; nz_h = 40
     a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
@@ -591,7 +1174,10 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
     z_quad = z_h.copy(); z_w = pr_z.copy()
     r_min, r_max = -0.15, 0.08
     coeffs_curr = None; dist_curr = None
-    
+
+    solver_name = "Newton" if use_newton else "Picard"
+    print(f"\n[{label}] Using {solver_name} policy solver")
+
     for out_iter in range(12):
         r = (r_min + r_max) / 2
         print(f"\n[Outer SS {label}] Iter {out_iter}: r={r:.6f}, bounds=[{r_min:.4f}, {r_max:.4f}]")
@@ -599,12 +1185,27 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
         for inn_iter in range(25):
             w = (w_low + w_high) / 2
             if not distortions:
-                coeffs = solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
+                if use_newton:
+                    # Use Picard with Anderson acceleration (fast and reasonably accurate)
+                    coeffs, success = solve_policy_newton(
+                        params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w,
+                        coeffs_init=coeffs_curr, tol=1e-8, verbose=(inn_iter % 3 == 0),
+                        max_iter=150, method='picard_accelerated'
+                    )
+                else:
+                    coeffs = solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
                 dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
                 ed_L = labor_excess_mu_nodist(w, r, dist, a_h, z_h, params)
                 coeffs_curr, dist_curr = coeffs, dist
             else:
-                cp, cm = solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, prob_tp, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
+                if use_newton:
+                    cp, cm, success = solve_policy_newton_with_dist(
+                        params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w, prob_tp,
+                        coeffs_init=coeffs_curr, tol=1e-8, verbose=(inn_iter % 3 == 0),
+                        max_iter=150
+                    )
+                else:
+                    cp, cm = solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, prob_tp, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
                 mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
                 ed_L = labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
                 coeffs_curr, dist_curr = (cp, cm), np.concatenate([mu_p.ravel(), mu_m.ravel()])
@@ -661,12 +1262,21 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
 
 def solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, quad_z, quad_w, coeffs_init, diag_out=None, key="post", show_plot=False):
     delta, alpha, nu, lam, beta, sigma, psi = params
-    # Initialize with a small 'seed' of savings if no warm start to avoid zero-asset trap
+    # Initialize with a feasible policy based on income at each node
     if coeffs_init is not None:
         coeffs = coeffs_init
     else:
-        # A simple linear rule: save 10% of max assets as a starting guess
-        seed_vals = 0.1 * nodes_a.repeat(N_CHEBY_Z) + 0.05 * A_MAX
+        # Initialize with savings = fraction of income to ensure budget feasibility
+        seed_vals = np.zeros(len(nodes_a) * N_CHEBY_Z)
+        idx = 0
+        for ia in range(len(nodes_a)):
+            for iz in range(N_CHEBY_Z):
+                a, z = nodes_a[ia], nodes_z[iz]
+                p, _, _, _ = solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, nu)
+                inc = max(p, w) + (1 + r) * a
+                # Save 80% of income minus minimum consumption
+                seed_vals[idx] = max(A_MIN, min(0.8 * inc, inc - 0.01))
+                idx += 1
         coeffs = T_inv @ seed_vals
 
     for i in range(MAX_ITER_POLICY):
@@ -686,7 +1296,24 @@ def solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv
     if coeffs_in is not None:
         cp, cm = coeffs_in
     else:
-        cp = np.zeros(N_CHEBY_A * N_CHEBY_Z); cm = np.zeros(N_CHEBY_A * N_CHEBY_Z)
+        # Initialize with feasible policies based on income at each node
+        seed_p = np.zeros(N_CHEBY_A * N_CHEBY_Z)
+        seed_m = np.zeros(N_CHEBY_A * N_CHEBY_Z)
+        idx = 0
+        for ia in range(len(nodes_a)):
+            for iz in range(N_CHEBY_Z):
+                a, z = nodes_a[ia], nodes_z[iz]
+                # tau_plus case
+                pp, _, _, _ = solve_entrepreneur_with_tau(a, z, TAU_PLUS, w, r, lam, delta, alpha, nu)
+                inc_p = max(pp, w) + (1 + r) * a
+                seed_p[idx] = max(A_MIN, min(0.8 * inc_p, inc_p - 0.01))
+                # tau_minus case
+                pm, _, _, _ = solve_entrepreneur_with_tau(a, z, TAU_MINUS, w, r, lam, delta, alpha, nu)
+                inc_m = max(pm, w) + (1 + r) * a
+                seed_m[idx] = max(A_MIN, min(0.8 * inc_m, inc_m - 0.01))
+                idx += 1
+        cp = T_inv @ seed_p
+        cm = T_inv @ seed_m
     for i in range(MAX_ITER_POLICY):
         cnp = solve_policy_bivariate_update_with_dist(cp, cm, nodes_a, nodes_z, T_inv, beta, sigma, psi, w, r, lam, delta, alpha, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, prob_tp, TAU_PLUS, TAU_MINUS, True)
         cnm = solve_policy_bivariate_update_with_dist(cp, cm, nodes_a, nodes_z, T_inv, beta, sigma, psi, w, r, lam, delta, alpha, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, prob_tp, TAU_PLUS, TAU_MINUS, False)
@@ -792,15 +1419,23 @@ def solve_policy_transition_update_v2(c_curr, c_next, n_a, n_z, T_inv, beta, sig
         target[i] = max(amin, min(inc - c_tar, amax))
     return T_inv @ target
 
-def solve_policy_transition_at_t_simple(c_next, wt, rt, wt1, rt1, params):
+def solve_policy_transition_at_t_simple(c_next, wt, rt, wt1, rt1, params, max_iter=50, tol=1e-6):
     d, a, nu, lam, beta, sig, psi = params
-    n_a, n_z, T_inv = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)[0:3]; T_inv = np.linalg.inv(T_inv)
-    qz = n_z; qw = np.ones(len(n_z))/len(n_z) # Simple integration for transition step
+    n_a, n_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
+    T_inv = np.linalg.inv(T_full)
+    qz = n_z
+    qw = np.ones(len(n_z)) / len(n_z)  # Simple integration for transition step
     c = c_next.copy()
-    for _ in range(20):
+    converged = False
+    for it in range(max_iter):
         c_new = solve_policy_transition_update_v2(c, c_next, n_a, n_z, T_inv, beta, sig, psi, wt, rt, wt1, rt1, lam, d, a, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, qz, qw)
-        if np.max(np.abs(c_new - c)) < 1e-6: break
+        diff = np.max(np.abs(c_new - c))
+        if diff < tol:
+            converged = True
+            break
         c = 0.5 * c + 0.5 * c_new
+    if not converged:
+        print(f"    [WARNING] Transition policy at (w={wt:.4f}, r={rt:.4f}) did not converge after {max_iter} iters, diff={diff:.2e}")
     return c
 
 # =============================================================================

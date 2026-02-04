@@ -166,5 +166,44 @@ The algorithm requires two conditions to stop:
     \item \textbf{Sequence Convergence}: The maximum change in price paths between iterations must be small: $\max_t |r_t^{(n+1)} - r_t^{(n)}| < \epsilon_{seq}$.
     \item \textbf{Market Clearing Gaps}: The actual excess demand residuals (calculated by re-evaluating the economy with the final prices) must satisfy $|ED_L| < \epsilon_{ED}$ and $|ED_K| < \epsilon_{ED}$.
 \end{enumerate}
+In the implementation, the default tolerances are $\epsilon_{seq} = 2 \times 10^{-4}$ for sequence convergence and $\epsilon_{ED} = 2 \times 10^{-3}$ for market clearing gaps. The relaxation parameters are $\eta_w = 0.35$ for wages and $\eta_r = 0.20$ for interest rates.
+
+\section{Aggregate Variables and TFP}
+Once the equilibrium prices $(w^*, r^*)$ and stationary distribution $\mu^*$ are computed, aggregate quantities are calculated as:
+\begin{align}
+    K &= \sum_{i,j} \mu(a_i, z_j) \cdot k^*(a_i, z_j) \cdot \bm{1}_{\{\pi > w\}} \\
+    L_d &= \sum_{i,j} \mu(a_i, z_j) \cdot l^*(a_i, z_j) \cdot \bm{1}_{\{\pi > w\}} \\
+    Y &= \sum_{i,j} \mu(a_i, z_j) \cdot y(a_i, z_j, k^*, l^*) \cdot \bm{1}_{\{\pi > w\}} \\
+    s_e &= \sum_{i,j} \mu(a_i, z_j) \cdot \bm{1}_{\{\pi > w\}}
+\end{align}
+where $s_e$ is the share of entrepreneurs and $L_s = 1 - s_e$ is the labor supply. Total Factor Productivity (TFP) is then computed as:
+\begin{equation}
+    \text{TFP} = \frac{Y}{\left( K^\alpha L_s^{1-\alpha} \right)^{1-\nu}}
+\end{equation}
+This measure captures the efficiency losses from misallocation due to financial frictions.
+
+\section{Calibration Parameters}
+The model is calibrated following Buera \& Shin (2013), Table 1:
+\begin{center}
+\begin{tabular}{lcc}
+\hline
+Parameter & Symbol & Value \\
+\hline
+Risk aversion & $\sigma$ & 1.5 \\
+Discount factor & $\beta$ & 0.904 \\
+Capital share & $\alpha$ & 0.33 \\
+Span of control & $1-\nu$ & 0.79 \\
+Depreciation & $\delta$ & 0.06 \\
+Pareto tail & $\eta$ & 4.15 \\
+Ability persistence & $\psi$ & 0.894 \\
+Collateral constraint & $\lambda$ & 1.35 \\
+\hline
+\multicolumn{3}{l}{\textit{Pre-reform distortions:}} \\
+Tax wedge & $\tau^+$ & 0.57 \\
+Subsidy wedge & $\tau^-$ & $-0.15$ \\
+Correlation parameter & $q$ & 1.55 \\
+\hline
+\end{tabular}
+\end{center}
 
 \end{document}

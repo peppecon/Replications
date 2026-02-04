@@ -118,13 +118,87 @@ where $\bm{T}$ is the matrix of Chebyshev basis functions evaluated at the collo
 
 
 \section{Distributional and Transition Dynamics}
-The distribution is tracked on a dense grid using a Markov transition matrix $Q$ derived from the continuous policy $\hat{a}$.
-\begin{equation}
-    \mu_{t+1}(a', z') = \sum_{a, z} \mathbb{P}(a' | a, z) \mathbb{P}(z' | z) \mu_t(a, z)
-\end{equation}
-Aggregate labor $L_t$ and capital $K_t$ are then calculated by summing firm decisions over the distribution $\mu_t$.
 
-\section{Convergence and General Equilibrium}
-The general equilibrium wage $w$ and interest rate $r$ are found by iterating on the price paths using Algorithm B.2. The spectral method’s continuity ensures that the excess demand functions $ED_L(w, r)$ and $ED_K(w, r)$ are smooth, allowing for robust bisection even with a relatively small number of spectral nodes.
+\subsection{Transition Matrix Construction}
+The distribution is tracked on a dense histogram grid $(a^h_i, z^h_j)$ with $N_a^h \times N_z^h$ points. Given the continuous spectral policy $\hat{a}'(a, z; \bm{\gamma})$, we construct a sparse Markov transition matrix $Q$ as follows.
+
+For each state $(a^h_i, z^h_j)$, we compute the optimal savings $a' = \hat{a}'(a^h_i, z^h_j; \bm{\gamma})$. Since $a'$ generally falls between grid points, we use linear interpolation weights:
+\begin{equation}
+    a' \in [a^h_k, a^h_{k+1}] \implies \omega_{k+1} = \frac{a' - a^h_k}{a^h_{k+1} - a^h_k}, \quad \omega_k = 1 - \omega_{k+1}
+\end{equation}
+The transition probability from state $(a^h_i, z^h_j)$ to $(a^h_m, z^h_n)$ is:
+\begin{equation}
+    Q_{(i,j) \to (m,n)} = \omega_m \cdot \mathbb{P}(z^h_n | z^h_j)
+\end{equation}
+where $\mathbb{P}(z' | z) = \psi \cdot \bm{1}_{z'=z} + (1-\psi) \cdot \pi(z')$.
+
+\subsection{Stationary Distribution}
+The stationary distribution $\mu^*$ satisfies $\mu^* = Q^\top \mu^*$ and is computed via power iteration:
+\begin{equation}
+    \mu^{(n+1)} = \frac{Q^\top \mu^{(n)}}{\| Q^\top \mu^{(n)} \|_1}
+\end{equation}
+Convergence is achieved when $\| \mu^{(n+1)} - \mu^{(n)} \|_\infty < 10^{-10}$.
+
+\subsection{Forward Simulation for Transition}
+During the transition path, the distribution $\mu_t$ evolves according to:
+\begin{equation}
+    \mu_{t+1}(a', z') = \sum_{a, z} \mathbb{P}(a' | a, z; \bm{\gamma}_t) \mathbb{P}(z' | z) \mu_t(a, z)
+\end{equation}
+where $\bm{\gamma}_t$ are the time-varying spectral coefficients computed via backward induction.
+
+\section{Coupled Value Functions for Pre-Reform Distortions}
+In the pre-reform economy with idiosyncratic distortions $\tau \in \{\tau^+, \tau^-\}$, we solve for two coupled policy functions $\hat{a}^+(a, z; \bm{\gamma}^+)$ and $\hat{a}^-(a, z; \bm{\gamma}^-)$. The expectation operator becomes:
+\begin{align}
+    \mathcal{E}^+(a'; \bm{\gamma}^+, \bm{\gamma}^-) &= \psi \cdot \mu^+(a', z) + (1-\psi) \sum_k \pi_k \left[ p(z_k) \mu^+(a', z_k) + (1-p(z_k)) \mu^-(a', z_k) \right] \\
+    \mathcal{E}^-(a'; \bm{\gamma}^+, \bm{\gamma}^-) &= \psi \cdot \mu^-(a', z) + (1-\psi) \sum_k \pi_k \left[ p(z_k) \mu^+(a', z_k) + (1-p(z_k)) \mu^-(a', z_k) \right]
+\end{align}
+where $\mu^\pm(a, z) = (y^\pm(a, z) - \hat{a}^\pm(a, z))^{-\sigma}$ is the marginal utility under each distortion state, and $p(z) = 1 - e^{-qz}$ is the probability of $\tau = \tau^+$ conditional on ability $z$.
+
+\section{General Equilibrium: Nested Price Clearing}
+The general equilibrium prices $(w^*, r^*)$ are found using Algorithm B.2 from Buera \& Shin (2013):
+
+\subsection{Nested Loop Structure}
+\begin{enumerate}
+    \item \textbf{Outer Loop (Interest Rate)}: Bisection on $r \in [r_{min}, r_{max}]$ to clear the capital market.
+    \begin{enumerate}
+        \item \textbf{Inner Loop (Wage)}: Given $r^{(n)}$, bisection on $w$ to clear the labor market:
+        \begin{itemize}
+            \item Solve the spectral policy $\bm{\gamma}(w, r^{(n)})$
+            \item Compute stationary distribution $\mu(w, r^{(n)})$
+            \item Evaluate excess labor demand: $ED_L(w) = L_d(\mu) - (1 - s_e(\mu))$
+        \end{itemize}
+        \item With converged $w^*(r^{(n)})$, evaluate capital market excess demand:
+        \begin{equation}
+            ED_K(r) = K_d(\mu) - A_s(\mu)
+        \end{equation}
+    \end{enumerate}
+\end{enumerate}
+
+\subsection{Smoothness of Spectral Methods}
+The key advantage of spectral approximation is that the policy function $\hat{a}'(a, z)$ is \textit{globally smooth} (infinitely differentiable). This ensures that aggregate demand functions $K_d(w, r)$ and $L_d(w, r)$ are continuous and differentiable, eliminating the ``step'' artifacts that arise from discrete grid methods and improving convergence of the bisection algorithm.
+
+\section{Calibration Parameters}
+\begin{center}
+\begin{tabular}{lcc}
+\hline
+Parameter & Symbol & Value \\
+\hline
+Risk aversion & $\sigma$ & 1.5 \\
+Discount factor & $\beta$ & 0.904 \\
+Capital share & $\alpha$ & 0.33 \\
+Span of control & $1-\nu$ & 0.79 \\
+Depreciation & $\delta$ & 0.06 \\
+Pareto tail & $\eta$ & 4.15 \\
+Ability persistence & $\psi$ & 0.894 \\
+Collateral constraint & $\lambda$ & 1.35 \\
+\hline
+\multicolumn{3}{l}{\textit{Spectral parameters:}} \\
+Chebyshev nodes (assets) & $N_a^{cheb}$ & 15 \\
+Chebyshev nodes (ability) & $N_z^{cheb}$ & 15 \\
+Histogram grid (assets) & $N_a^h$ & 600 \\
+Histogram grid (ability) & $N_z^h$ & 40 \\
+\hline
+\end{tabular}
+\end{center}
 
 \end{document}
