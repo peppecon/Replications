@@ -1,1407 +1,1425 @@
-
 """
-Buera & Shin (2010) — Appendix Algorithm B.2
-Fast and stable Monte Carlo + market-clearing (computed in Numba)
+Buera & Shin (2010) Transition Dynamics with Idiosyncratic Distortions
+VERSION: Howard Policy Iteration (based on buera_shin_v3_howard_pi.py)
 
-Key improvements vs naive MC implementation:
-1) NO tail anchoring. We solve for prices on t=0..T-1 and impose terminal condition at t=T.
-2) Per-period market clearing uses a *binned distribution* on the (a,z) grid (and (a,z,tau) pre-reform).
-   This makes wage/interest root-finds fast + much less noisy, eliminating ED spikes from MC jitter.
-3) Robust bracketing for per-period wage and interest rate (scan + bisection).
-4) Convergence criteria require small sequence updates AND small market-clearing gaps.
+This script builds on the working v3 Howard PI code and adds:
+1. Distortions mode for pre-reform stationary equilibrium
+2. Transition path computation via Time Path Iteration (TPI)
 
-Economy:
-- Agents choose occupation each period: entrepreneur if profit(a,z;w,r) > w (assets return cancels).
-- Ability follows "reset" process: with prob PSI keep z, else draw z' from prob_z.
-- Pre-reform only: distortion tau ∈ {tau_plus, tau_minus} drawn conditional on z when ability resets.
+Computes:
+1. Post-reform stationary equilibrium: lambda=1.35 without distortions (tau=0)
+2. Pre-reform stationary equilibrium: lambda=1.35 with idiosyncratic output wedges
+3. Perfect-foresight transition path
 
-What this script does:
-A) Solve post-reform stationary steady state (tau=0) using B.2-style nested loops.
-B) Solve pre-reform stationary steady state (distortions) to obtain initial distribution at t=0.
-C) Solve the transition path after reform at t=0 using Algorithm B.2.
-
-Plot:
-- Final figure shows t=-4..+20 (shock at 0).
-- All positive variables normalized by pre steady state.
-- Interest rate plotted as (1+r)/(1+r_pre) for a clean normalization even if r_pre < 0.
-
-Run:
-  python buera_shin_transition_B2_fastclear.py --T 125 --na 601 --amax 200 --N 350000 --out outputs
-
-Tip (debug faster):
-  python ... --N 50000 --T 60 --na 401
+Usage:
+    python transition_path_v3_howardpi.py --T 250
 """
 
-import os
-import argparse
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from numba import njit, prange
+from scipy import sparse
+import os
+import json
+import argparse
+import time
 import warnings
-import warnings
-warnings.filterwarnings("ignore")
+
+warnings.filterwarnings('ignore')
 
 # =============================================================================
-# Calibration (paper)
+# Model Parameters (from v3 + distortion parameters)
 # =============================================================================
-SIGMA = 1.5
-BETA  = 0.904
-ALPHA = 0.33
-NU    = 0.21          # entrepreneur share; span-of-control = 1-NU
-DELTA = 0.06
-ETA   = 4.15
-PSI   = 0.894
+SIGMA = 1.5      # Risk aversion
+BETA = 0.904     # Discount factor
+ALPHA = 0.33     # Capital share
+NU = 0.21        # Entrepreneur share (Span of control = 0.79)
+DELTA = 0.06     # Depreciation
+ETA = 4.15       # Pareto tail
+PSI = 0.894      # Persistence
 
-LAMBDA = 1.35         # collateral constraint multiplier
+# Financial friction
+LAMBDA = 1.35    # Collateral constraint
 
-# Pre-reform distortions (only for initial steady state / distribution)
-TAU_PLUS  = 0.57
-TAU_MINUS = -0.15
-Q_DIST    = 1.55
+# Distortion parameters
+TAU_PLUS = 0.57      # Tax rate (positive wedge)
+TAU_MINUS = -0.15    # Subsidy rate (negative wedge)
+Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 
-# =============================================================================
-# Algorithm B.2 numerical controls
-# =============================================================================
-# Relaxation parameters (η_w, η_r in the Appendix)
-ETA_W = 0.35
-ETA_R = 0.20
-
-# Convergence tolerances (sequence sup norms)
-TOL_W_SEQ = 2e-4
-TOL_R_SEQ = 2e-4
-
-# How hard we enforce market clearing at the end of the algorithm
-TOL_ED_L = 2e-3
-TOL_ED_K = 2e-3
-
-MAX_W_INNER = 30    # inner iterations on wage path given r path
-MAX_OUTER   = 30    # outer iterations on interest rate path
-
-# Per-period bisection parameters
-N_SCAN       = 28   # scan points for robust bracketing
-MAX_BISECT_IT = 28  # bisection steps once bracket found
-
-# Price bounds
-W_MIN, W_MAX = 0.02, 8.0
-# Important: r + delta is the rental cost in the firm problem. Ensure rental > 0.
-R_MIN = -DELTA + 1e-6
-R_MAX = (1.0 / BETA) - 1.0 - 1e-6
+# Grid parameters
+N_A = 501
+A_MIN = 1e-6
+A_MAX = 4000
 
 # =============================================================================
-# Grids (paper's ability grid)
+# Grid Construction (from v3)
 # =============================================================================
-def create_ability_grid_paper(
-    eta: float,
-    n_z: int = 60,
-    zmax_target: float = 4.5,   # set None if you want to pick umax directly
-    umax: float = 0.995,  # e.g. 0.995
-):
-    """
-    Pareto ability grid using equal-probability bins on u in [0, umax].
-    z(u) = (1-u)^(-1/eta)
 
-    If zmax_target is given, we set umax so that the top quantile equals zmax_target:
-        umax = 1 - zmax_target^(-eta)
-    """
-    if umax is None:
-        if zmax_target is None:
-            raise ValueError("Provide either umax or zmax_target.")
-        umax = 1.0 - zmax_target ** (-eta)
+def create_ability_grid_paper(eta):
+    """Paper's exact 40-point ability discretization"""
+    n_z = 40
+    M_values = np.zeros(n_z)
+    M_values[:38] = np.linspace(0.633, 0.998, 38)
+    M_values[38] = 0.999
+    M_values[39] = 0.9995
+    z_grid = (1 - M_values) ** (-1/eta)
 
-    # equal-probability bins on [0, umax]
-    edges = np.linspace(0.0, umax, n_z + 1)
-    mids  = 0.5 * (edges[:-1] + edges[1:])
-
-    z_grid = (1.0 - mids) ** (-1.0 / eta)
-
-    # probabilities = bin lengths, renormalized (sum to 1)
-    prob_z = (edges[1:] - edges[:-1]) / umax
+    prob_z = np.zeros(n_z)
+    prob_z[0] = M_values[0] / M_values[-1]
+    for j in range(1, n_z):
+        prob_z[j] = (M_values[j] - M_values[j-1]) / M_values[-1]
     prob_z = prob_z / prob_z.sum()
 
-    return z_grid.astype(np.float64), prob_z.astype(np.float64)
+    return z_grid, prob_z
 
-def create_asset_grid(n_a: int, a_min: float, a_max: float, power: float = 2.0):
-    x = np.linspace(0.0, 1.0, n_a) ** power
-    a = a_min + (a_max - a_min) * x
-    a[0] = max(a[0], 1e-10)
-    return a.astype(np.float64)
+def create_asset_grid(n_a, a_min, a_max):
+    """Asset grid with curvature scaling"""
+    a_grid = a_min + (a_max - a_min) * np.linspace(0, 1, n_a) ** 2
+    a_grid[0] = max(a_grid[0], 1e-6)
+    return a_grid
 
-def compute_tau_probs(z_grid: np.ndarray, q: float):
-    return (1.0 - np.exp(-q * z_grid)).astype(np.float64)
+def compute_tau_probs(z_grid, q):
+    """Probability of tau_plus given ability"""
+    return 1 - np.exp(-q * z_grid)
 
 # =============================================================================
-# Firm problem (static): span-of-control technology
-# y = z * (k^alpha * l^(1-alpha))^(1-nu)
+# Entrepreneur Problem (with distortion support)
 # =============================================================================
-@njit(cache=False)
-def solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu):
-    """
-    Returns: profit, k*, l*, output
-    Constraint: k <= lam * a
-    """
-    rental = r + delta
-    if rental <= 1e-12:
-        rental = 1e-12
-    wage = w
-    if wage <= 1e-12:
-        wage = 1e-12
 
-    span = 1.0 - nu  # returns to scale in (k,l)
+@njit(cache=True)
+def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
+    """Original entrepreneur problem (no distortion)"""
+    rental = max(r + delta, 1e-8)
+    wage = max(w, 1e-8)
 
-    # closed-form unconstrained k (from FOCs) then apply collateral constraint
-    aux1 = (alpha * span * z) / rental
-    aux2 = ((1.0 - alpha) * span * z) / wage
+    span = 1 - upsilon
+    aux1 = (1/rental) * alpha * span * z
+    aux2 = (1/wage) * (1-alpha) * span * z
+    exp1 = 1 - (1-alpha) * span
+    exp2 = (1-alpha) * span
+    k1 = (aux1 ** exp1 * aux2 ** exp2) ** (1/upsilon)
 
-    exp1 = 1.0 - (1.0 - alpha) * span
-    exp2 = (1.0 - alpha) * span
+    kstar = min(k1, lam * a)
 
-    k_uncon = (aux1 ** exp1 * aux2 ** exp2) ** (1.0 / nu)
-    k = k_uncon
-    k_cap = lam * a
-    if k > k_cap:
-        k = k_cap
+    inside_lab = (1/wage) * (1-alpha) * span * z * (kstar ** (alpha * span))
+    lstar = inside_lab ** (1/exp1)
 
-    # labor from FOC given k
-    l = (aux2 * (k ** (alpha * span))) ** (1.0 / exp1)
+    output = z * ((kstar ** alpha) * (lstar ** (1-alpha))) ** span
+    profit = output - wage * lstar - rental * kstar
 
-    y = z * ((k ** alpha) * (l ** (1.0 - alpha))) ** span
-    profit = y - wage * l - rental * k
-    return profit, k, l, y
+    return profit, kstar, lstar, output
 
-@njit(cache=False)
-def solve_firm_with_tau(a, z, tau, w, r, lam, delta, alpha, nu):
-    """
-    Distortion as output wedge: (1-tau)*y - w l - (r+delta)k
-    Equivalent to productivity z_eff = (1-tau)*z.
-    """
+@njit(cache=True)
+def solve_entrepreneur_with_tau(a, z, tau, w, r, lam, delta, alpha, upsilon):
+    """Entrepreneur problem WITH distortion tau"""
     z_eff = (1.0 - tau) * z
-    if z_eff <= 1e-14:
-        return -1e18, 0.0, 0.0, 0.0
-    return solve_firm_no_tau(a, z_eff, w, r, lam, delta, alpha, nu)
+    if z_eff <= 0:
+        return -1e10, 0.0, 0.0, 0.0
 
-# =============================================================================
-# Preferences and Bellman pieces
-# =============================================================================
-@njit(cache=False)
-def utility(c, sigma):
-    if c <= 1e-12:
-        return -1e18
-    if abs(sigma - 1.0) < 1e-10:
-        return np.log(c)
-    return (c ** (1.0 - sigma) - 1.0) / (1.0 - sigma)
+    rental = max(r + delta, 1e-8)
+    wage = max(w, 1e-8)
 
-@njit(cache=False)
-def find_optimal_savings(income, a_grid, EV_row, beta, sigma, start_idx):
-    n_a = len(a_grid)
-    best_val = -1e19
-    best_idx = start_idx
-    for ip in range(start_idx, n_a):
-        c = income - a_grid[ip]
-        if c <= 1e-12:
-            break
-        v = utility(c, sigma) + beta * EV_row[ip]
-        if v > best_val:
-            best_val = v
-            best_idx = ip
-    return best_val, best_idx
+    span = 1 - upsilon
+    aux1 = (1/rental) * alpha * span * z_eff
+    aux2 = (1/wage) * (1-alpha) * span * z_eff
+    exp1 = 1 - (1-alpha) * span
+    exp2 = (1-alpha) * span
+    k1 = (aux1 ** exp1 * aux2 ** exp2) ** (1/upsilon)
 
-@njit(cache=False, parallel=True)
-def bellman_one_step(V_next, a_grid, z_grid, prob_z, income_t, beta, sigma, psi):
-    """
-    Finite-horizon one-step operator:
-      V_t(a,z) = max_{a'} u(income_t(a,z) - a') + beta * E[ V_{t+1}(a', z') | z ]
-    Ability transition:
-      z' = z with prob psi
-      z' ~ prob_z with prob (1-psi)
-    """
+    kstar = min(k1, lam * a)
+
+    inside_lab = (1/wage) * (1-alpha) * span * z_eff * (kstar ** (alpha * span))
+    lstar = inside_lab ** (1/exp1)
+
+    output = z_eff * ((kstar ** alpha) * (lstar ** (1-alpha))) ** span
+    profit = output - wage * lstar - rental * kstar
+
+    return profit, kstar, lstar, output
+
+@njit(cache=True, parallel=True)
+def precompute_entrepreneur_all(a_grid, z_grid, w, r, lam, delta, alpha, upsilon):
+    """Pre-compute entrepreneur solutions for ALL (a,z) pairs - NO distortion"""
     n_a = len(a_grid)
     n_z = len(z_grid)
 
-    V_t = np.empty((n_a, n_z), dtype=np.float64)
-    pol_idx = np.empty((n_a, n_z), dtype=np.int32)
-
-    # Vbar(a') = sum_{z'} prob_z(z') * V_next(a', z')
-    Vbar = np.zeros(n_a, dtype=np.float64)
-    for ia in range(n_a):
-        s = 0.0
-        for iz in range(n_z):
-            s += prob_z[iz] * V_next[ia, iz]
-        Vbar[ia] = s
-
-    for iz in prange(n_z):
-        EV_row = psi * V_next[:, iz] + (1.0 - psi) * Vbar
-        start = 0
-        for ia in range(n_a):
-            v, idx = find_optimal_savings(income_t[ia, iz], a_grid, EV_row, beta, sigma, start)
-            V_t[ia, iz] = v
-            pol_idx[ia, iz] = idx
-            start = idx
-
-    return V_t, pol_idx
-
-@njit(cache=False)
-def howard_update(V, pol_idx, a_grid, z_grid, prob_z, income, beta, sigma, psi, n_howard):
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    for _ in range(n_howard):
-        # Vbar
-        Vbar = np.zeros(n_a, dtype=np.float64)
-        for ia in range(n_a):
-            s = 0.0
-            for iz in range(n_z):
-                s += prob_z[iz] * V[ia, iz]
-            Vbar[ia] = s
-        V_new = np.empty((n_a, n_z), dtype=np.float64)
-        for iz in range(n_z):
-            for ia in range(n_a):
-                ip = pol_idx[ia, iz]
-                c = income[ia, iz] - a_grid[ip]
-                cont = psi * V[ip, iz] + (1.0 - psi) * Vbar[ip]
-                V_new[ia, iz] = utility(c, sigma) + beta * cont
-        V = V_new
-    return V
-
-def solve_stationary_value(a_grid, z_grid, prob_z, income, V_init=None, tol=1e-6, max_iter=800, n_howard=25):
-    n_a, n_z = len(a_grid), len(z_grid)
-    if V_init is None:
-        V = np.zeros((n_a, n_z), dtype=np.float64)
-        for ia in range(n_a):
-            c0 = max(income[ia, 0] - a_grid[0], 1e-3)
-            V[ia, :] = utility(c0, SIGMA) / (1.0 - BETA)
-    else:
-        V = V_init.copy()
-
-    pol = np.zeros((n_a, n_z), dtype=np.int32)
-
-    for it in range(max_iter):
-        V_new, pol_new = bellman_one_step(V, a_grid, z_grid, prob_z, income, BETA, SIGMA, PSI)
-        diff = np.max(np.abs(V_new - V))
-        pol = pol_new
-        # Howard if not too close
-        if n_howard > 0 and diff > 20 * tol:
-            V = howard_update(V_new, pol, a_grid, z_grid, prob_z, income, BETA, SIGMA, PSI, n_howard)
-        else:
-            V = V_new
-        if diff < tol:
-            break
-    return V, pol
-
-# =============================================================================
-# Coupled stationary value iteration (pre-reform distortions)
-# =============================================================================
-@njit(cache=False, parallel=True)
-def coupled_bellman_one_step(Vp, Vm, a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi):
-    """
-    Bellman operator for two tau states (tau_plus, tau_minus) with persistence driven by ability persistence:
-      with prob psi: (z,tau) stays the same
-      with prob 1-psi: new z' ~ prob_z, and tau' drawn conditional on z' with prob_tau_plus(z')
-    """
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-
-    Vp_new = np.empty((n_a, n_z), dtype=np.float64)
-    Vm_new = np.empty((n_a, n_z), dtype=np.float64)
-    polp = np.empty((n_a, n_z), dtype=np.int32)
-    polm = np.empty((n_a, n_z), dtype=np.int32)
-
-    # EV_uncond(a') = sum_z' prob_z(z') [p(z')Vp(a',z') + (1-p(z'))Vm(a',z')]
-    EV = np.zeros(n_a, dtype=np.float64)
-    for ia in range(n_a):
-        s = 0.0
-        for iz in range(n_z):
-            pz = prob_tau_plus[iz]
-            s += prob_z[iz] * (pz * Vp[ia, iz] + (1.0 - pz) * Vm[ia, iz])
-        EV[ia] = s
-
-    for iz in prange(n_z):
-        EVp_row = psi * Vp[:, iz] + (1.0 - psi) * EV
-        EVm_row = psi * Vm[:, iz] + (1.0 - psi) * EV
-        sp = 0
-        sm = 0
-        for ia in range(n_a):
-            vp, ip = find_optimal_savings(inc_p[ia, iz], a_grid, EVp_row, beta, sigma, sp)
-            vm, im = find_optimal_savings(inc_m[ia, iz], a_grid, EVm_row, beta, sigma, sm)
-            Vp_new[ia, iz] = vp
-            Vm_new[ia, iz] = vm
-            polp[ia, iz] = ip
-            polm[ia, iz] = im
-            sp = ip
-            sm = im
-
-    return Vp_new, Vm_new, polp, polm
-
-@njit(cache=False)
-def coupled_howard_update(Vp, Vm, polp, polm, a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi, n_howard):
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    for _ in range(n_howard):
-        EV = np.zeros(n_a, dtype=np.float64)
-        for ia in range(n_a):
-            s = 0.0
-            for iz in range(n_z):
-                pz = prob_tau_plus[iz]
-                s += prob_z[iz] * (pz * Vp[ia, iz] + (1.0 - pz) * Vm[ia, iz])
-            EV[ia] = s
-
-        Vp_new = np.empty((n_a, n_z), dtype=np.float64)
-        Vm_new = np.empty((n_a, n_z), dtype=np.float64)
-        for iz in range(n_z):
-            for ia in range(n_a):
-                ipp = polp[ia, iz]
-                ipm = polm[ia, iz]
-                cp = inc_p[ia, iz] - a_grid[ipp]
-                cm = inc_m[ia, iz] - a_grid[ipm]
-                cont_p = psi * Vp[ipp, iz] + (1.0 - psi) * EV[ipp]
-                cont_m = psi * Vm[ipm, iz] + (1.0 - psi) * EV[ipm]
-                Vp_new[ia, iz] = utility(cp, sigma) + beta * cont_p
-                Vm_new[ia, iz] = utility(cm, sigma) + beta * cont_m
-        Vp = Vp_new
-        Vm = Vm_new
-    return Vp, Vm
-
-def solve_stationary_value_coupled(a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m,
-                                  Vp_init=None, Vm_init=None,
-                                  tol=1e-6, max_iter=900, n_howard=25):
-    n_a, n_z = len(a_grid), len(z_grid)
-    if Vp_init is None:
-        Vp = np.zeros((n_a, n_z), dtype=np.float64)
-        Vm = np.zeros((n_a, n_z), dtype=np.float64)
-        for ia in range(n_a):
-            cp0 = max(inc_p[ia, 0] - a_grid[0], 1e-3)
-            cm0 = max(inc_m[ia, 0] - a_grid[0], 1e-3)
-            Vp[ia, :] = utility(cp0, SIGMA) / (1.0 - BETA)
-            Vm[ia, :] = utility(cm0, SIGMA) / (1.0 - BETA)
-    else:
-        Vp = Vp_init.copy()
-        Vm = Vm_init.copy()
-
-    polp = np.zeros((n_a, n_z), dtype=np.int32)
-    polm = np.zeros((n_a, n_z), dtype=np.int32)
-
-    for it in range(max_iter):
-        Vp_new, Vm_new, polp_new, polm_new = coupled_bellman_one_step(
-            Vp, Vm, a_grid, z_grid, prob_z, prob_tau_plus,
-            inc_p, inc_m, BETA, SIGMA, PSI
-        )
-        diff = max(np.max(np.abs(Vp_new - Vp)), np.max(np.abs(Vm_new - Vm)))
-        polp, polm = polp_new, polm_new
-
-        if n_howard > 0 and diff > 20 * tol:
-            Vp, Vm = coupled_howard_update(Vp_new, Vm_new, polp, polm,
-                                           a_grid, z_grid, prob_z, prob_tau_plus,
-                                           inc_p, inc_m, BETA, SIGMA, PSI, n_howard)
-        else:
-            Vp, Vm = Vp_new, Vm_new
-
-        if diff < tol:
-            break
-
-    return Vp, Vm, polp, polm
-
-# =============================================================================
-# Income precomputation (given prices)
-# =============================================================================
-@njit(cache=False, parallel=True)
-def precompute_income_no_dist(a_grid, z_grid, w, r, lam, delta, alpha, nu):
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    inc = np.empty((n_a, n_z), dtype=np.float64)
-    wage = w if w > 1e-12 else 1e-12
-    for iz in prange(n_z):
-        z = z_grid[iz]
-        for ia in range(n_a):
-            a = a_grid[ia]
-            p, _, _, _ = solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu)
-            if p > wage:
-                inc[ia, iz] = p + (1.0 + r) * a
-            else:
-                inc[ia, iz] = wage + (1.0 + r) * a
-    return inc
-
-@njit(cache=False, parallel=True)
-def precompute_income_with_tau(a_grid, z_grid, tau, w, r, lam, delta, alpha, nu):
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    inc = np.empty((n_a, n_z), dtype=np.float64)
-    wage = w if w > 1e-12 else 1e-12
-    for iz in prange(n_z):
-        z = z_grid[iz]
-        for ia in range(n_a):
-            a = a_grid[ia]
-            p, _, _, _ = solve_firm_with_tau(a, z, tau, w, r, lam, delta, alpha, nu)
-            if p > wage:
-                inc[ia, iz] = p + (1.0 + r) * a
-            else:
-                inc[ia, iz] = wage + (1.0 + r) * a
-    return inc
-
-# =============================================================================
-# Shocks
-# =============================================================================
-def generate_shocks(n_agents, t_steps, psi, prob_z, seed=1234):
-    rng = np.random.default_rng(seed)
-    resets = (rng.random((t_steps, n_agents)) > psi).astype(np.uint8)
-    cdf = np.cumsum(prob_z)
-    shocks = np.searchsorted(cdf, rng.random((t_steps, n_agents))).astype(np.uint8)
-    return resets, shocks
-
-def generate_shocks_with_tau(n_agents, t_steps, psi, prob_z, prob_tau_plus, seed=1234):
-    resets, shocks = generate_shocks(n_agents, t_steps, psi, prob_z, seed=seed)
-    rng = np.random.default_rng(seed + 111)
-    tau_shocks = np.empty((t_steps, n_agents), dtype=np.uint8)
-    for t in range(t_steps):
-        z_new = shocks[t]
-        probs = prob_tau_plus[z_new]
-        tau_shocks[t] = (rng.random(n_agents) < probs).astype(np.uint8)
-    return resets, shocks, tau_shocks
-
-# =============================================================================
-# Simulation helpers
-# =============================================================================
-@njit(cache=False)
-def get_interp_weights(x, grid):
-    n = len(grid)
-    if x <= grid[0]:
-        return 0, 0, 1.0
-    if x >= grid[-1]:
-        return n - 2, n - 1, 0.0
-    lo = 0
-    hi = n - 1
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if grid[mid] > x:
-            hi = mid
-        else:
-            lo = mid
-    w_lo = (grid[hi] - x) / (grid[hi] - grid[lo])
-    return lo, hi, w_lo
-
-@njit(cache=False, parallel=True)
-def simulate_step_nodist(a_curr, z_curr, pol_a_vals, a_grid, reset_t, shock_t):
-    """
-    Decision uses current (a,z). Next-period z updates via reset process.
-    pol_a_vals is policy in asset *levels* (not indices), shape (n_a,n_z).
-    """
-    n = len(a_curr)
-    a_next = np.empty(n, dtype=np.float64)
-    z_next = np.empty(n, dtype=np.uint8)
-    for i in prange(n):
-        zc = z_curr[i]
-        z_next[i] = shock_t[i] if reset_t[i] else zc
-        il, ih, wl = get_interp_weights(a_curr[i], a_grid)
-        a_next[i] = wl * pol_a_vals[il, zc] + (1.0 - wl) * pol_a_vals[ih, zc]
-    return a_next, z_next
-
-@njit(cache=False, parallel=True)
-def simulate_step_dist(a_curr, z_curr, tau_state, polp_a_vals, polm_a_vals,
-                       a_grid, reset_t, shock_t, tau_shock_t):
-    """
-    tau_state: 1 if tau_plus, 0 if tau_minus.
-    tau updates only when reset.
-    """
-    n = len(a_curr)
-    a_next = np.empty(n, dtype=np.float64)
-    z_next = np.empty(n, dtype=np.uint8)
-    tau_next = np.empty(n, dtype=np.uint8)
-
-    for i in prange(n):
-        zc = z_curr[i]
-        tc = tau_state[i]
-        z_next[i] = shock_t[i] if reset_t[i] else zc
-        tau_next[i] = tau_shock_t[i] if reset_t[i] else tc
-
-        il, ih, wl = get_interp_weights(a_curr[i], a_grid)
-        if tc == 1:
-            a_next[i] = wl * polp_a_vals[il, zc] + (1.0 - wl) * polp_a_vals[ih, zc]
-        else:
-            a_next[i] = wl * polm_a_vals[il, zc] + (1.0 - wl) * polm_a_vals[ih, zc]
-
-    return a_next, z_next, tau_next
-
-@njit(cache=False)
-def fill_mu_az(a_vec, z_vec, a_grid, mu_out):
-    """
-    Build histogram μ(a,z) on the asset grid using linear weights.
-    mu_out is overwritten and normalized to sum to 1.
-    Returns mean assets A = E[a] (computed from sample).
-    """
-    n_a = mu_out.shape[0]
-    n_z = mu_out.shape[1]
-    # reset
-    for ia in range(n_a):
-        for iz in range(n_z):
-            mu_out[ia, iz] = 0.0
-
-    sA = 0.0
-    n = len(a_vec)
-    for i in range(n):
-        a = a_vec[i]
-        sA += a
-        iz = z_vec[i]
-        il, ih, wl = get_interp_weights(a, a_grid)
-        mu_out[il, iz] += wl
-        mu_out[ih, iz] += (1.0 - wl)
-
-    inv = 1.0 / n
-    for ia in range(n_a):
-        for iz in range(n_z):
-            mu_out[ia, iz] *= inv
-
-    return sA * inv
-
-@njit(cache=False)
-def fill_mu_aztau(a_vec, z_vec, tau_state, a_grid, mu_p_out, mu_m_out):
-    """
-    Build μ_plus(a,z) and μ_minus(a,z), normalized so μ_plus + μ_minus sums to 1.
-    Returns mean assets A.
-    """
-    n_a = mu_p_out.shape[0]
-    n_z = mu_p_out.shape[1]
-    for ia in range(n_a):
-        for iz in range(n_z):
-            mu_p_out[ia, iz] = 0.0
-            mu_m_out[ia, iz] = 0.0
-
-    sA = 0.0
-    n = len(a_vec)
-    for i in range(n):
-        a = a_vec[i]
-        sA += a
-        iz = z_vec[i]
-        il, ih, wl = get_interp_weights(a, a_grid)
-        if tau_state[i] == 1:
-            mu_p_out[il, iz] += wl
-            mu_p_out[ih, iz] += (1.0 - wl)
-        else:
-            mu_m_out[il, iz] += wl
-            mu_m_out[ih, iz] += (1.0 - wl)
-
-    inv = 1.0 / n
-    for ia in range(n_a):
-        for iz in range(n_z):
-            mu_p_out[ia, iz] *= inv
-            mu_m_out[ia, iz] *= inv
-
-    return sA * inv
-
-# =============================================================================
-# Market clearing on binned distributions
-# =============================================================================
-@njit(cache=False)
-def labor_excess_mu_nodist(mu, a_grid, z_grid, w, r, lam, delta, alpha, nu):
-    """
-    ED_L = Ld - Ls, where Ls = 1 - s_e.
-    """
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    wage = w if w > 1e-12 else 1e-12
-    Ld = 0.0
-    s_e = 0.0
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            wt = mu[ia, iz]
-            if wt <= 0.0:
-                continue
-            z = z_grid[iz]
-            p, _, l, _ = solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu)
-            if p > wage:
-                Ld += wt * l
-                s_e += wt
-    Ls = 1.0 - s_e
-    return Ld - Ls
-
-@njit(cache=False)
-def capital_excess_mu_nodist(mu, A, a_grid, z_grid, w, r, lam, delta, alpha, nu):
-    """
-    ED_K = Kd - A, where A is fixed capital supply (mean assets from simulation).
-    """
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    wage = w if w > 1e-12 else 1e-12
-    Kd = 0.0
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            wt = mu[ia, iz]
-            if wt <= 0.0:
-                continue
-            z = z_grid[iz]
-            p, k, _, _ = solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu)
-            if p > wage:
-                Kd += wt * k
-    return Kd - A
-
-@njit(cache=False)
-def labor_excess_mu_dist(mu_p, mu_m, a_grid, z_grid, w, r, lam, delta, alpha, nu, tau_p, tau_m):
-    wage = w if w > 1e-12 else 1e-12
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    Ld = 0.0
-    s_e = 0.0
-
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            z = z_grid[iz]
-            wt_p = mu_p[ia, iz]
-            if wt_p > 0.0:
-                p, _, l, _ = solve_firm_with_tau(a, z, tau_p, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    Ld += wt_p * l
-                    s_e += wt_p
-            wt_m = mu_m[ia, iz]
-            if wt_m > 0.0:
-                p, _, l, _ = solve_firm_with_tau(a, z, tau_m, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    Ld += wt_m * l
-                    s_e += wt_m
-
-    Ls = 1.0 - s_e
-    return Ld - Ls
-
-@njit(cache=False)
-def capital_excess_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r, lam, delta, alpha, nu, tau_p, tau_m):
-    wage = w if w > 1e-12 else 1e-12
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    Kd = 0.0
-
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            z = z_grid[iz]
-            wt_p = mu_p[ia, iz]
-            if wt_p > 0.0:
-                p, k, _, _ = solve_firm_with_tau(a, z, tau_p, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    Kd += wt_p * k
-            wt_m = mu_m[ia, iz]
-            if wt_m > 0.0:
-                p, k, _, _ = solve_firm_with_tau(a, z, tau_m, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    Kd += wt_m * k
-
-    return Kd - A
-
-@njit(cache=False)
-def aggregates_mu_nodist(mu, A, a_grid, z_grid, w, r, lam, delta, alpha, nu):
-    """
-    Returns K, L, Y, s_e (all per capita; mu sums to 1).
-    A is mean assets from simulation (used to report ED_K too).
-    """
-    wage = w if w > 1e-12 else 1e-12
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    K = 0.0
-    L = 0.0
-    Y = 0.0
-    s_e = 0.0
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            wt = mu[ia, iz]
-            if wt <= 0.0:
-                continue
-            z = z_grid[iz]
-            p, k, l, y = solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu)
-            if p > wage:
-                K += wt * k
-                L += wt * l
-                Y += wt * y
-                s_e += wt
-    return K, L, Y, s_e
-
-@njit(cache=False)
-def aggregates_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r, lam, delta, alpha, nu, tau_p, tau_m):
-    wage = w if w > 1e-12 else 1e-12
-    n_a = len(a_grid)
-    n_z = len(z_grid)
-    K = 0.0
-    L = 0.0
-    Y = 0.0
-    s_e = 0.0
-    for ia in range(n_a):
-        a = a_grid[ia]
-        for iz in range(n_z):
-            z = z_grid[iz]
-            wt_p = mu_p[ia, iz]
-            if wt_p > 0.0:
-                p, k, l, y = solve_firm_with_tau(a, z, tau_p, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    K += wt_p * k
-                    L += wt_p * l
-                    Y += wt_p * y
-                    s_e += wt_p
-            wt_m = mu_m[ia, iz]
-            if wt_m > 0.0:
-                p, k, l, y = solve_firm_with_tau(a, z, tau_m, w, r, lam, delta, alpha, nu)
-                if p > wage:
-                    K += wt_m * k
-                    L += wt_m * l
-                    Y += wt_m * y
-                    s_e += wt_m
-    return K, L, Y, s_e
-
-# =============================================================================
-# Robust root solves (Python wrappers calling fast Numba ED functions)
-# =============================================================================
-def _bisect_root(func, lo, hi, max_it=MAX_BISECT_IT, tol_x=1e-10):
-    f_lo = func(lo)
-    f_hi = func(hi)
-    if f_lo == 0.0:
-        return lo
-    if f_hi == 0.0:
-        return hi
-    # assumes sign change
-    for _ in range(max_it):
-        mid = 0.5 * (lo + hi)
-        f_mid = func(mid)
-        if abs(hi - lo) < tol_x:
-            return mid
-        if f_lo * f_mid <= 0.0:
-            hi = mid
-            f_hi = f_mid
-        else:
-            lo = mid
-            f_lo = f_mid
-    return 0.5 * (lo + hi)
-
-def solve_w_clear_mu_nodist(mu_t, a_grid, z_grid, r_t, w_guess):
-    w_guess = float(np.clip(w_guess, W_MIN, W_MAX))
-
-    def f(w):
-        return float(labor_excess_mu_nodist(mu_t, a_grid, z_grid, w, r_t, LAMBDA, DELTA, ALPHA, NU))
-
-    # quick check
-    f0 = f(w_guess)
-    if abs(f0) < 1e-10:
-        return w_guess
-
-    # local bracket
-    lo = max(W_MIN, 0.6 * w_guess)
-    hi = min(W_MAX, 1.6 * w_guess)
-    f_lo = f(lo)
-    f_hi = f(hi)
-    if f_lo * f_hi < 0.0:
-        return _bisect_root(f, lo, hi)
-
-    # global scan
-    grid = np.linspace(W_MIN, W_MAX, N_SCAN)
-    vals = np.array([f(x) for x in grid], dtype=np.float64)
-
-    # find sign changes
-    sign = np.sign(vals)
-    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
-    if idx.size > 0:
-        # choose interval closest to w_guess
-        centers = 0.5 * (grid[idx] + grid[idx+1])
-        j = int(np.argmin(np.abs(centers - w_guess)))
-        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
-        return _bisect_root(f, lo, hi)
-
-    # no sign change: return minimizer of |f|
-    j = int(np.argmin(np.abs(vals)))
-    return float(grid[j])
-
-def solve_r_clear_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r_guess):
-    r_guess = float(np.clip(r_guess, R_MIN, R_MAX))
-
-    def f(r):
-        return float(capital_excess_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r, LAMBDA, DELTA, ALPHA, NU))
-
-    f0 = f(r_guess)
-    if abs(f0) < 1e-10:
-        return r_guess
-
-    lo = max(R_MIN, r_guess - 0.04)
-    hi = min(R_MAX, r_guess + 0.04)
-    f_lo = f(lo)
-    f_hi = f(hi)
-    if f_lo * f_hi < 0.0:
-        return _bisect_root(f, lo, hi)
-
-    grid = np.linspace(R_MIN, R_MAX, N_SCAN)
-    vals = np.array([f(x) for x in grid], dtype=np.float64)
-
-    sign = np.sign(vals)
-    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
-    if idx.size > 0:
-        centers = 0.5 * (grid[idx] + grid[idx+1])
-        j = int(np.argmin(np.abs(centers - r_guess)))
-        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
-        return _bisect_root(f, lo, hi)
-
-    j = int(np.argmin(np.abs(vals)))
-    return float(grid[j])
-
-def solve_w_clear_mu_dist(mu_p_t, mu_m_t, a_grid, z_grid, r_t, w_guess):
-    w_guess = float(np.clip(w_guess, W_MIN, W_MAX))
-
-    def f(w):
-        return float(labor_excess_mu_dist(mu_p_t, mu_m_t, a_grid, z_grid, w, r_t,
-                                         LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS))
-
-    f0 = f(w_guess)
-    if abs(f0) < 1e-10:
-        return w_guess
-
-    lo = max(W_MIN, 0.6 * w_guess)
-    hi = min(W_MAX, 1.6 * w_guess)
-    f_lo = f(lo)
-    f_hi = f(hi)
-    if f_lo * f_hi < 0.0:
-        return _bisect_root(f, lo, hi)
-
-    grid = np.linspace(W_MIN, W_MAX, N_SCAN)
-    vals = np.array([f(x) for x in grid], dtype=np.float64)
-    sign = np.sign(vals)
-    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
-    if idx.size > 0:
-        centers = 0.5 * (grid[idx] + grid[idx+1])
-        j = int(np.argmin(np.abs(centers - w_guess)))
-        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
-        return _bisect_root(f, lo, hi)
-    j = int(np.argmin(np.abs(vals)))
-    return float(grid[j])
-
-def solve_r_clear_mu_dist(mu_p_t, mu_m_t, A_t, a_grid, z_grid, w_t, r_guess):
-    r_guess = float(np.clip(r_guess, R_MIN, R_MAX))
-
-    def f(r):
-        return float(capital_excess_mu_dist(mu_p_t, mu_m_t, A_t, a_grid, z_grid, w_t, r,
-                                            LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS))
-
-    f0 = f(r_guess)
-    if abs(f0) < 1e-10:
-        return r_guess
-
-    lo = max(R_MIN, r_guess - 0.04)
-    hi = min(R_MAX, r_guess + 0.04)
-    f_lo = f(lo)
-    f_hi = f(hi)
-    if f_lo * f_hi < 0.0:
-        return _bisect_root(f, lo, hi)
-
-    grid = np.linspace(R_MIN, R_MAX, N_SCAN)
-    vals = np.array([f(x) for x in grid], dtype=np.float64)
-    sign = np.sign(vals)
-    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
-    if idx.size > 0:
-        centers = 0.5 * (grid[idx] + grid[idx+1])
-        j = int(np.argmin(np.abs(centers - r_guess)))
-        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
-        return _bisect_root(f, lo, hi)
-    j = int(np.argmin(np.abs(vals)))
-    return float(grid[j])
-
-# =============================================================================
-# Steady state solvers (B.2-style nested loops)
-# =============================================================================
-def steady_state_post(a_grid, z_grid, prob_z, N, burn, seed=42, verbose=True):
-    """
-    Post-reform stationary equilibrium (tau=0) using nested loops:
-      - inner loop solves w given r using labor clearing varpi
-      - outer loop updates r given w using capital clearing iota
-    """
-    resets, shocks = generate_shocks(N, burn, PSI, prob_z, seed=seed)
-
-    # initial guesses
-    w = 0.8
-    r = -0.04
-
-    V = None
-    pol = None
-
-    mu = np.empty((len(a_grid), len(z_grid)), dtype=np.float64)
-
-    # to check grid truncation
-    top_mass = 0.0
-
-    for outer in range(60):
-        r_old = r
-
-        # ---------- inner wage loop ----------
-        for inner in range(50):
-            w_old = w
-
-            inc = precompute_income_no_dist(a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU)
-            V, pol = solve_stationary_value(a_grid, z_grid, prob_z, inc, V_init=V)
-
-            pol_a = a_grid[pol]  # levels
-
-            # simulate burn-in
-            rng = np.random.default_rng(1000)  # common seed across iterations
-            a = np.ones(N, dtype=np.float64) * a_grid[0]
-            # draw initial z from stationary marginal prob_z (faster burn-in)
-            cdf_z = np.cumsum(prob_z)
-            z = np.searchsorted(cdf_z, rng.random(N)).astype(np.uint8)
-            for t in range(burn):
-                a, z = simulate_step_nodist(a, z, pol_a, a_grid, resets[t], shocks[t])
-
-            # build μ(a,z)
-            A = fill_mu_az(a, z, a_grid, mu)
-
-            # diagnostic: mass at top bin (proxy for truncation)
-            top_mass = float(mu[-1, :].sum())
-
-            # labor clearing wage
-            w_clear = solve_w_clear_mu_nodist(mu, a_grid, z_grid, r, w)
-            w = ETA_W * w_clear + (1.0 - ETA_W) * w
-            w = float(np.clip(w, W_MIN, W_MAX))
-
-            if verbose and (inner < 2 or inner % 5 == 0):
-                edL = float(labor_excess_mu_nodist(mu, a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU))
-                print(f"[POST SS | outer {outer+1:02d} wage {inner+1:02d}] w={w:.6f}  |Δw|={abs(w-w_old):.2e}  ED_L={edL:.3e}")
-
-            if abs(w - w_old) < 5e-5:
-                break
-
-        # ---------- r update (capital clearing) ----------
-        r_clear = solve_r_clear_mu_nodist(mu, A, a_grid, z_grid, w, r)
-        r = ETA_R * r_clear + (1.0 - ETA_R) * r
-        r = float(np.clip(r, R_MIN, R_MAX))
-
-        edL = float(labor_excess_mu_nodist(mu, a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU))
-        edK = float(capital_excess_mu_nodist(mu, A, a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU))
-        if verbose:
-            print(f"[POST SS | outer {outer+1:02d}] r={r:.6f}  |Δr|={abs(r-r_old):.2e}  ED_L={edL:.3e}  ED_K={edK:.3e}\n")
-
-        if abs(r - r_old) < 1e-5 and abs(edL) < 2e-3 and abs(edK) < 2e-3:
-            break
-
-    # aggregates at SS
-    K, L, Y, s_e = aggregates_mu_nodist(mu, A, a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU)
-    span = 1.0 - NU
-    Ls = 1.0 - s_e
-    TFP = Y / max(((K ** ALPHA) * (Ls ** (1.0 - ALPHA))) ** span, 1e-12)
-
-    if verbose and top_mass > 1e-3:
-        print(f"WARNING: mass at top asset bin is {top_mass:.3e}. Consider increasing --amax or --na.\n")
-
-    return dict(w=w, r=r, V=V, pol=pol, mu=mu.copy(), A=A, Y=Y, K=K, L=L, s_e=s_e, TFP=TFP)
-
-def steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N, burn, seed=77, verbose=True):
-    """
-    Pre-reform stationary equilibrium with distortions (tau_plus/tau_minus).
-    Uses the same nested-loop structure as post SS.
-    Returns also a sample cross-section (a,z) to initialize transition at t=0.
-    """
-    resets, shocks, tau_shocks = generate_shocks_with_tau(N, burn, PSI, prob_z, prob_tau_plus, seed=seed)
-
-    # initial guesses close to post SS but lower wage
-    w = 0.55
-    r = -0.05
-
-    Vp = None
-    Vm = None
-    polp = None
-    polm = None
-
-    mu_p = np.empty((len(a_grid), len(z_grid)), dtype=np.float64)
-    mu_m = np.empty((len(a_grid), len(z_grid)), dtype=np.float64)
-
-    for outer in range(80):
-        r_old = r
-
-        # ---------- inner wage loop ----------
-        for inner in range(60):
-            w_old = w
-
-            inc_p = precompute_income_with_tau(a_grid, z_grid, TAU_PLUS,  w, r, LAMBDA, DELTA, ALPHA, NU)
-            inc_m = precompute_income_with_tau(a_grid, z_grid, TAU_MINUS, w, r, LAMBDA, DELTA, ALPHA, NU)
-
-            Vp, Vm, polp, polm = solve_stationary_value_coupled(
-                a_grid, z_grid, prob_z, prob_tau_plus, inc_p, inc_m,
-                Vp_init=Vp, Vm_init=Vm
+    profit_grid = np.zeros((n_a, n_z))
+    kstar_grid = np.zeros((n_a, n_z))
+    lstar_grid = np.zeros((n_a, n_z))
+    output_grid = np.zeros((n_a, n_z))
+    is_entrep_grid = np.zeros((n_a, n_z))
+    income_grid = np.zeros((n_a, n_z))
+
+    for i_z in prange(n_z):
+        z = z_grid[i_z]
+        for i_a in range(n_a):
+            a = a_grid[i_a]
+            profit, kstar, lstar, output = solve_entrepreneur_single(
+                a, z, w, r, lam, delta, alpha, upsilon
             )
 
-            polp_a = a_grid[polp]
-            polm_a = a_grid[polm]
+            profit_grid[i_a, i_z] = profit
+            kstar_grid[i_a, i_z] = kstar
+            lstar_grid[i_a, i_z] = lstar
+            output_grid[i_a, i_z] = output
 
-            # simulate burn-in with tau state
-            rng = np.random.default_rng(2000)  # common seed across iterations
-            a = np.ones(N, dtype=np.float64) * a_grid[0]
-            # draw initial z from stationary marginal prob_z (faster burn-in)
-            cdf_z = np.cumsum(prob_z)
-            z = np.searchsorted(cdf_z, rng.random(N)).astype(np.uint8)
-            u = rng.random(N)
-            tau_state = (u < prob_tau_plus[z]).astype(np.uint8)
+            if profit > w:
+                is_entrep_grid[i_a, i_z] = 1.0
+                income_grid[i_a, i_z] = profit + (1 + r) * a
+            else:
+                is_entrep_grid[i_a, i_z] = 0.0
+                income_grid[i_a, i_z] = w + (1 + r) * a
 
-            for t in range(burn):
-                a, z, tau_state = simulate_step_dist(a, z, tau_state, polp_a, polm_a,
-                                                     a_grid, resets[t], shocks[t], tau_shocks[t])
+    return profit_grid, kstar_grid, lstar_grid, output_grid, is_entrep_grid, income_grid
 
-            A = fill_mu_aztau(a, z, tau_state, a_grid, mu_p, mu_m)
+@njit(cache=True, parallel=True)
+def precompute_entrepreneur_with_tau(a_grid, z_grid, tau, w, r, lam, delta, alpha, upsilon):
+    """Pre-compute entrepreneur solutions WITH distortion tau"""
+    n_a = len(a_grid)
+    n_z = len(z_grid)
 
-            w_clear = solve_w_clear_mu_dist(mu_p, mu_m, a_grid, z_grid, r, w)
-            w = ETA_W * w_clear + (1.0 - ETA_W) * w
-            w = float(np.clip(w, W_MIN, W_MAX))
+    profit_grid = np.zeros((n_a, n_z))
+    kstar_grid = np.zeros((n_a, n_z))
+    lstar_grid = np.zeros((n_a, n_z))
+    output_grid = np.zeros((n_a, n_z))
+    is_entrep_grid = np.zeros((n_a, n_z))
+    income_grid = np.zeros((n_a, n_z))
 
-            if verbose and (inner < 2 or inner % 6 == 0):
-                edL = float(labor_excess_mu_dist(mu_p, mu_m, a_grid, z_grid, w, r,
-                                                LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS))
-                print(f"[PRE  SS | outer {outer+1:02d} wage {inner+1:02d}] w={w:.6f}  |Δw|={abs(w-w_old):.2e}  ED_L={edL:.3e}")
+    for i_z in prange(n_z):
+        z = z_grid[i_z]
+        for i_a in range(n_a):
+            a = a_grid[i_a]
+            profit, kstar, lstar, output = solve_entrepreneur_with_tau(
+                a, z, tau, w, r, lam, delta, alpha, upsilon
+            )
 
-            if abs(w - w_old) < 5e-5:
-                break
+            profit_grid[i_a, i_z] = profit
+            kstar_grid[i_a, i_z] = kstar
+            lstar_grid[i_a, i_z] = lstar
+            output_grid[i_a, i_z] = output
 
-        r_clear = solve_r_clear_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r)
-        r = ETA_R * r_clear + (1.0 - ETA_R) * r
-        r = float(np.clip(r, R_MIN, R_MAX))
+            if profit > w:
+                is_entrep_grid[i_a, i_z] = 1.0
+                income_grid[i_a, i_z] = profit + (1 + r) * a
+            else:
+                is_entrep_grid[i_a, i_z] = 0.0
+                income_grid[i_a, i_z] = w + (1 + r) * a
 
-        edL = float(labor_excess_mu_dist(mu_p, mu_m, a_grid, z_grid, w, r,
-                                        LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS))
-        edK = float(capital_excess_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r,
-                                          LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS))
+    return profit_grid, kstar_grid, lstar_grid, output_grid, is_entrep_grid, income_grid
+
+# =============================================================================
+# Value Function Iteration (from v3)
+# =============================================================================
+
+@njit(cache=True)
+def utility(c, sigma):
+    """CRRA utility"""
+    if c <= 1e-10:
+        return -1e10
+    if abs(sigma - 1.0) < 1e-6:
+        return np.log(c)
+    return (c ** (1 - sigma) - 1) / (1 - sigma)
+
+@njit(cache=True)
+def find_optimal_savings_monotone(income, a_grid, EV_row, beta, sigma, start_idx):
+    """Binary-like search exploiting monotonicity"""
+    n_a = len(a_grid)
+    best_val = -1e15
+    best_idx = start_idx
+
+    for i_a_prime in range(start_idx, n_a):
+        c = income - a_grid[i_a_prime]
+        if c <= 1e-10:
+            break
+        val = utility(c, sigma) + beta * EV_row[i_a_prime]
+        if val > best_val:
+            best_val = val
+            best_idx = i_a_prime
+
+    return best_val, best_idx
+
+@njit(cache=True, parallel=True)
+def bellman_operator_fast(V, a_grid, z_grid, prob_z, income_grid, beta, sigma, psi):
+    """Fast Bellman operator with pre-computed income"""
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+
+    V_new = np.zeros((n_a, n_z))
+    policy_a_idx = np.zeros((n_a, n_z), dtype=np.int64)
+
+    # Pre-compute expected values
+    EV = np.zeros((n_a, n_z))
+    V_mean = np.zeros(n_a)
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            V_mean[i_a] += prob_z[i_z] * V[i_a, i_z]
+
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            EV[i_a, i_z] = psi * V[i_a, i_z] + (1 - psi) * V_mean[i_a]
+
+    for i_z in prange(n_z):
+        start_idx = 0
+
+        for i_a in range(n_a):
+            income = income_grid[i_a, i_z]
+
+            best_val, best_idx = find_optimal_savings_monotone(
+                income, a_grid, EV[:, i_z], beta, sigma, start_idx
+            )
+
+            V_new[i_a, i_z] = best_val
+            policy_a_idx[i_a, i_z] = best_idx
+            start_idx = best_idx
+
+    return V_new, policy_a_idx
+
+@njit(cache=True, parallel=True)
+def howard_acceleration(V, policy_a_idx, a_grid, z_grid, prob_z,
+                        income_grid, beta, sigma, psi, n_howard=10):
+    """Howard's Policy Iteration Acceleration"""
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+
+    for _ in range(n_howard):
+        EV = np.zeros((n_a, n_z))
+        V_mean = np.zeros(n_a)
+        for i_a in range(n_a):
+            for i_z in range(n_z):
+                V_mean[i_a] += prob_z[i_z] * V[i_a, i_z]
+
+        for i_a in range(n_a):
+            for i_z in range(n_z):
+                EV[i_a, i_z] = psi * V[i_a, i_z] + (1 - psi) * V_mean[i_a]
+
+        V_new = np.zeros((n_a, n_z))
+
+        for i_z in prange(n_z):
+            for i_a in range(n_a):
+                income = income_grid[i_a, i_z]
+                i_a_prime = policy_a_idx[i_a, i_z]
+                c = income - a_grid[i_a_prime]
+                V_new[i_a, i_z] = utility(c, sigma) + beta * EV[i_a_prime, i_z]
+
+        V = V_new
+
+    return V
+
+def solve_value_function_fast(a_grid, z_grid, prob_z, income_grid,
+                              beta, sigma, psi, V_init=None,
+                              tol=1e-5, max_iter=500, n_howard=15):
+    """VFI with Howard acceleration and warm start"""
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    if V_init is not None:
+        V = V_init.copy()
+    else:
+        V = np.zeros((n_a, n_z))
+        for i_a in range(n_a):
+            c_guess = max(income_grid[i_a, 0] - a_grid[0], 0.01)
+            V[i_a, :] = utility(c_guess, sigma) / (1 - beta)
+
+    for iteration in range(max_iter):
+        V_new, policy_a_idx = bellman_operator_fast(
+            V, a_grid, z_grid, prob_z, income_grid, beta, sigma, psi
+        )
+
+        diff = np.max(np.abs(V_new - V))
+
+        if diff < tol:
+            return V_new, policy_a_idx
+
+        if n_howard > 0 and diff > tol * 10:
+            V = howard_acceleration(V_new, policy_a_idx, a_grid, z_grid, prob_z,
+                                   income_grid, beta, sigma, psi, n_howard)
+        else:
+            V = V_new
+
+    return V, policy_a_idx
+
+# =============================================================================
+# Coupled VFI (For Pre-Reform Distortions)
+# =============================================================================
+
+@njit(cache=True, parallel=True)
+def coupled_bellman_operator(V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus,
+                              inc_p, inc_m, beta, sigma, psi):
+    """
+    Bellman operator for coupled tau states.
+    V_p = value function for tau_plus state
+    V_m = value function for tau_minus state
+    """
+    n_a, n_z = len(a_grid), len(z_grid)
+    V_p_new = np.zeros((n_a, n_z))
+    V_m_new = np.zeros((n_a, n_z))
+    pol_p_idx = np.zeros((n_a, n_z), dtype=np.int64)
+    pol_m_idx = np.zeros((n_a, n_z), dtype=np.int64)
+
+    # Joint expected value across tau states (unconditional over z' and tau')
+    EV_unconditional = np.zeros(n_a)
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            EV_unconditional[i_a] += prob_z[i_z] * (
+                prob_tau_plus[i_z] * V_p[i_a, i_z] +
+                (1 - prob_tau_plus[i_z]) * V_m[i_a, i_z]
+            )
+
+    for i_z in prange(n_z):
+        # EV for staying at current z (persistence) vs redrawing
+        EV_row_p = psi * V_p[:, i_z] + (1 - psi) * EV_unconditional
+        EV_row_m = psi * V_m[:, i_z] + (1 - psi) * EV_unconditional
+
+        start_p, start_m = 0, 0
+
+        for i_a in range(n_a):
+            # tau_plus state
+            best_val_p, best_idx_p = find_optimal_savings_monotone(
+                inc_p[i_a, i_z], a_grid, EV_row_p, beta, sigma, start_p
+            )
+            V_p_new[i_a, i_z] = best_val_p
+            pol_p_idx[i_a, i_z] = best_idx_p
+            start_p = best_idx_p
+
+            # tau_minus state
+            best_val_m, best_idx_m = find_optimal_savings_monotone(
+                inc_m[i_a, i_z], a_grid, EV_row_m, beta, sigma, start_m
+            )
+            V_m_new[i_a, i_z] = best_val_m
+            pol_m_idx[i_a, i_z] = best_idx_m
+            start_m = best_idx_m
+
+    return V_p_new, V_m_new, pol_p_idx, pol_m_idx
+
+
+@njit(cache=True, parallel=True)
+def coupled_howard_acceleration(V_p, V_m, pol_p_idx, pol_m_idx, a_grid, z_grid,
+                                 prob_z, prob_tau_plus, inc_p, inc_m,
+                                 beta, sigma, psi, n_howard=15):
+    """Howard acceleration for coupled tau states"""
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    for _ in range(n_howard):
+        # Recompute unconditional expected value
+        EV_unconditional = np.zeros(n_a)
+        for i_a in range(n_a):
+            for i_z in range(n_z):
+                EV_unconditional[i_a] += prob_z[i_z] * (
+                    prob_tau_plus[i_z] * V_p[i_a, i_z] +
+                    (1 - prob_tau_plus[i_z]) * V_m[i_a, i_z]
+                )
+
+        V_p_new = np.zeros((n_a, n_z))
+        V_m_new = np.zeros((n_a, n_z))
+
+        for i_z in prange(n_z):
+            for i_a in range(n_a):
+                # tau_plus update
+                idx_p = pol_p_idx[i_a, i_z]
+                c_p = inc_p[i_a, i_z] - a_grid[idx_p]
+                EV_p = psi * V_p[idx_p, i_z] + (1 - psi) * EV_unconditional[idx_p]
+                V_p_new[i_a, i_z] = utility(c_p, sigma) + beta * EV_p
+
+                # tau_minus update
+                idx_m = pol_m_idx[i_a, i_z]
+                c_m = inc_m[i_a, i_z] - a_grid[idx_m]
+                EV_m = psi * V_m[idx_m, i_z] + (1 - psi) * EV_unconditional[idx_m]
+                V_m_new[i_a, i_z] = utility(c_m, sigma) + beta * EV_m
+
+        V_p = V_p_new
+        V_m = V_m_new
+
+    return V_p, V_m
+
+
+def solve_value_function_coupled(a_grid, z_grid, prob_z, prob_tau_plus,
+                                  inc_p, inc_m, beta, sigma, psi,
+                                  V_p_init=None, V_m_init=None,
+                                  tol=1e-5, max_iter=500, n_howard=15):
+    """Coupled VFI for distortion case"""
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    if V_p_init is not None:
+        V_p = V_p_init.copy()
+        V_m = V_m_init.copy()
+    else:
+        V_p = np.zeros((n_a, n_z))
+        V_m = np.zeros((n_a, n_z))
+        for i_a in range(n_a):
+            c_p = max(inc_p[i_a, 0] - a_grid[0], 0.01)
+            c_m = max(inc_m[i_a, 0] - a_grid[0], 0.01)
+            V_p[i_a, :] = utility(c_p, sigma) / (1 - beta)
+            V_m[i_a, :] = utility(c_m, sigma) / (1 - beta)
+
+    for iteration in range(max_iter):
+        V_p_new, V_m_new, pol_p, pol_m = coupled_bellman_operator(
+            V_p, V_m, a_grid, z_grid, prob_z, prob_tau_plus,
+            inc_p, inc_m, beta, sigma, psi
+        )
+
+        diff = max(np.max(np.abs(V_p_new - V_p)), np.max(np.abs(V_m_new - V_m)))
+
+        if diff < tol:
+            return V_p_new, V_m_new, pol_p, pol_m
+
+        if n_howard > 0 and diff > tol * 10:
+            V_p, V_m = coupled_howard_acceleration(
+                V_p_new, V_m_new, pol_p, pol_m, a_grid, z_grid,
+                prob_z, prob_tau_plus, inc_p, inc_m, beta, sigma, psi, n_howard
+            )
+        else:
+            V_p, V_m = V_p_new, V_m_new
+
+    return V_p, V_m, pol_p, pol_m
+
+# =============================================================================
+# Stationary Distribution (from v3)
+# =============================================================================
+
+@njit(cache=True)
+def build_transition_sparse_data(policy_a_idx, n_a, n_z, prob_z, psi):
+    """Build sparse transition matrix data"""
+    nnz = n_a * n_z * n_z
+    rows = np.zeros(nnz, dtype=np.int64)
+    cols = np.zeros(nnz, dtype=np.int64)
+    data = np.zeros(nnz)
+
+    idx = 0
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            s = i_a * n_z + i_z
+            i_a_prime = policy_a_idx[i_a, i_z]
+
+            for i_z_prime in range(n_z):
+                if i_z_prime == i_z:
+                    p = psi + (1 - psi) * prob_z[i_z_prime]
+                else:
+                    p = (1 - psi) * prob_z[i_z_prime]
+
+                if p > 1e-14:
+                    s_prime = i_a_prime * n_z + i_z_prime
+                    rows[idx] = s_prime
+                    cols[idx] = s
+                    data[idx] = p
+                    idx += 1
+
+    return rows[:idx], cols[:idx], data[:idx]
+
+def compute_stationary_distribution(policy_a_idx, a_grid, z_grid, prob_z, psi):
+    """Compute stationary distribution"""
+    n_a, n_z = len(a_grid), len(z_grid)
+    n_states = n_a * n_z
+
+    rows, cols, data = build_transition_sparse_data(
+        policy_a_idx, n_a, n_z, prob_z, psi
+    )
+
+    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+
+    mu = np.ones(n_states) / n_states
+    for _ in range(1000):
+        mu_new = Q @ mu
+        mu_new /= mu_new.sum()
+        if np.max(np.abs(mu_new - mu)) < 1e-14:
+            break
+        mu = mu_new
+
+    return mu_new.reshape((n_a, n_z))
+
+# =============================================================================
+# Stationary Distribution WITH Distortions
+# =============================================================================
+
+@njit(cache=True)
+def build_transition_sparse_data_with_dist(policy_plus_idx, policy_minus_idx,
+                                            n_a, n_z, prob_z, prob_tau_plus, psi):
+    """Build sparse transition for distortion case"""
+    # Each of the n_a*n_z*2 states has:
+    # 1 persistence entry + 2*n_z redraw entries (to tau_plus and tau_minus)
+    nnz = n_a * n_z * 2 * (1 + 2 * n_z)
+    rows = np.zeros(nnz, dtype=np.int64)
+    cols = np.zeros(nnz, dtype=np.int64)
+    data = np.zeros(nnz)
+
+    idx = 0
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            for i_tau in range(2):  # 0=plus, 1=minus
+                s = i_a * n_z * 2 + i_z * 2 + i_tau
+
+                if i_tau == 0:
+                    i_a_prime = policy_plus_idx[i_a, i_z]
+                else:
+                    i_a_prime = policy_minus_idx[i_a, i_z]
+
+                # Persistence: stay at (z, tau) with prob psi
+                s_next = i_a_prime * n_z * 2 + i_z * 2 + i_tau
+                rows[idx] = s_next
+                cols[idx] = s
+                data[idx] = psi
+                idx += 1
+
+                # Redraw: with prob 1-psi
+                for i_z_prime in range(n_z):
+                    p_z = prob_z[i_z_prime]
+                    p_tau_plus = prob_tau_plus[i_z_prime]
+
+                    # To tau_plus
+                    s_next = i_a_prime * n_z * 2 + i_z_prime * 2 + 0
+                    rows[idx] = s_next
+                    cols[idx] = s
+                    data[idx] = (1 - psi) * p_z * p_tau_plus
+                    idx += 1
+
+                    # To tau_minus
+                    s_next = i_a_prime * n_z * 2 + i_z_prime * 2 + 1
+                    rows[idx] = s_next
+                    cols[idx] = s
+                    data[idx] = (1 - psi) * p_z * (1 - p_tau_plus)
+                    idx += 1
+
+    return rows[:idx], cols[:idx], data[:idx]
+
+def compute_stationary_with_dist(policy_plus_idx, policy_minus_idx,
+                                  a_grid, z_grid, prob_z, prob_tau_plus, psi):
+    """Compute stationary distribution WITH distortions"""
+    n_a, n_z = len(a_grid), len(z_grid)
+    n_states = n_a * n_z * 2
+
+    rows, cols, data = build_transition_sparse_data_with_dist(
+        policy_plus_idx, policy_minus_idx, n_a, n_z, prob_z, prob_tau_plus, psi
+    )
+
+    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+
+    mu = np.ones(n_states) / n_states
+    for _ in range(1000):
+        mu_new = Q @ mu
+        mu_new /= mu_new.sum()
+        if np.max(np.abs(mu_new - mu)) < 1e-14:
+            break
+        mu = mu_new
+
+    mu_full = mu_new.reshape((n_a, n_z, 2))
+    return mu_full[:, :, 0], mu_full[:, :, 1]
+
+# =============================================================================
+# Aggregate Computation
+# =============================================================================
+
+def compute_aggregates(dist, a_grid, z_grid, prob_z, is_entrep_grid, kstar_grid, lstar_grid, output_grid):
+    """Compute aggregates (no distortions)"""
+    K = np.sum(dist * kstar_grid * is_entrep_grid)
+    L = np.sum(dist * lstar_grid * is_entrep_grid)
+    Y = np.sum(dist * output_grid * is_entrep_grid)
+
+    a_broadcast = a_grid[:, np.newaxis]
+    extfin_grid = np.maximum(0, kstar_grid - a_broadcast) * is_entrep_grid
+    extfin = np.sum(dist * extfin_grid)
+
+    A = np.sum(dist * a_broadcast)
+    share_entre = np.sum(dist * is_entrep_grid)
+
+    # Paper Figures: Distributional Stats
+    # 1. Average ability among active entrepreneurs
+    mass_entre = dist * is_entrep_grid
+    if mass_entre.sum() > 1e-12:
+        avg_z_entrep = np.sum(mass_entre * z_grid) / mass_entre.sum()
+    else:
+        avg_z_entrep = 0.0
+
+    # 2. Wealth share of top 5% ability agents
+    wealth_by_z = np.sum(dist * a_broadcast, axis=0)
+    prob_z_cum = np.cumsum(prob_z)
+    z_top5_idx = np.where(prob_z_cum >= 0.95)[0]
+    wealth_top5_share = np.sum(wealth_by_z[z_top5_idx]) / max(A, 1e-8)
+    
+    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 
+            'share_entre': share_entre, 'avg_z_entrep': avg_z_entrep,
+            'wealth_top5_share': wealth_top5_share}
+
+def compute_aggregates_with_dist(mu_plus, mu_minus, a_grid, z_grid, prob_z,
+                                  is_plus, k_plus, l_plus, out_plus,
+                                  is_minus, k_minus, l_minus, out_minus):
+    """Compute aggregates WITH distortions"""
+    a_broadcast = a_grid[:, np.newaxis]
+
+    K = np.sum(mu_plus * k_plus * is_plus) + np.sum(mu_minus * k_minus * is_minus)
+    L = np.sum(mu_plus * l_plus * is_plus) + np.sum(mu_minus * l_minus * is_minus)
+    Y = np.sum(mu_plus * out_plus * is_plus) + np.sum(mu_minus * out_minus * is_minus)
+
+    extfin_plus = np.maximum(0, k_plus - a_broadcast) * is_plus
+    extfin_minus = np.maximum(0, k_minus - a_broadcast) * is_minus
+    extfin = np.sum(mu_plus * extfin_plus) + np.sum(mu_minus * extfin_minus)
+
+    A = np.sum(mu_plus * a_broadcast) + np.sum(mu_minus * a_broadcast)
+    share_entre = np.sum(mu_plus * is_plus) + np.sum(mu_minus * is_minus)
+
+    # Paper Figures: Distributional Stats
+    # 1. Average ability among active entrepreneurs
+    mass_entre = mu_plus * is_plus + mu_minus * is_minus
+    if mass_entre.sum() > 1e-12:
+        avg_z_entrep = np.sum(mass_entre * z_grid) / mass_entre.sum()
+    else:
+        avg_z_entrep = 0.0
+
+    # 2. Wealth share of top 5% ability agents
+    wealth_by_z = np.sum((mu_plus + mu_minus) * a_broadcast, axis=0)
+    prob_z_cum = np.cumsum(prob_z)
+    z_top5_idx = np.where(prob_z_cum >= 0.95)[0]
+    wealth_top5_share = np.sum(wealth_by_z[z_top5_idx]) / max(A, 1e-8)
+
+    return {'K': K, 'L': L, 'Y': Y, 'A': A, 'extfin': extfin, 
+            'share_entre': share_entre, 'avg_z_entrep': avg_z_entrep,
+            'wealth_top5_share': wealth_top5_share}
+
+# =============================================================================
+# GE Solver - No Distortions
+# =============================================================================
+
+def find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
+                            w_init=0.80, r_init=-0.04, V_init=None,
+                            max_iter=100, tol=1e-3, verbose=True):
+    """Find stationary equilibrium WITHOUT distortions"""
+    delta, alpha, upsilon, lam, beta, sigma, psi = params
+
+    w, r = w_init, r_init
+    V_current = V_init
+    w_step, r_step = 0.3, 0.05
+    exc_L_prev, exc_K_prev = 0.0, 0.0
+
+    best_error = np.inf
+    best_result = None
+
+    exc_L_history = []
+    exc_K_history = []
+
+    for iteration in range(max_iter):
+        (profit_grid, kstar_grid, lstar_grid, output_grid,
+         is_entrep_grid, income_grid) = precompute_entrepreneur_all(
+            a_grid, z_grid, w, r, lam, delta, alpha, upsilon
+        )
+
+        V_current, policy_a_idx = solve_value_function_fast(
+            a_grid, z_grid, prob_z, income_grid,
+            beta, sigma, psi, V_init=V_current
+        )
+
+        dist = compute_stationary_distribution(
+            policy_a_idx, a_grid, z_grid, prob_z, psi
+        )
+
+        agg = compute_aggregates(
+            dist, a_grid, z_grid, prob_z, is_entrep_grid,
+            kstar_grid, lstar_grid, output_grid
+        )
+
+        exc_K = agg['K'] - agg['A']
+        exc_L = agg['L'] - (1 - agg['share_entre'])
+        total_error = abs(exc_L) + abs(exc_K)
         if verbose:
-            print(f"[PRE  SS | outer {outer+1:02d}] r={r:.6f}  |Δr|={abs(r-r_old):.2e}  ED_L={edL:.3e}  ED_K={edK:.3e}\n")
+            print(f"  [{iteration+1:3d}] w={w:.8f}, r={r:.8f} | K={agg['K']:.6f}, A={agg['A']:.6f} | "
+                  f"Ld={agg['L']:.6f}, Ls={1-agg['share_entre']:.6f} | err={total_error:.8f}")
 
-        if abs(r - r_old) < 1e-5 and abs(edL) < 3e-3 and abs(edK) < 3e-3:
+        if total_error < best_error:
+            best_error = total_error
+            best_result = {
+                'w': w, 'r': r, 'agg': agg.copy(),
+                'dist': dist.copy(), 'policy': policy_a_idx.copy(),
+                'V': V_current.copy(),
+                'is_entrep': is_entrep_grid.copy(),
+                'kstar': kstar_grid.copy(),
+                'lstar': lstar_grid.copy(),
+                'output': output_grid.copy(),
+            }
+
+        if abs(exc_L) < tol and abs(exc_K) < tol:
             break
 
-    # aggregates at SS
-    K, L, Y, s_e = aggregates_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r,
-                                     LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS)
-    span = 1.0 - NU
-    Ls = 1.0 - s_e
-    TFP = Y / max(((K ** ALPHA) * (Ls ** (1.0 - ALPHA))) ** span, 1e-12)
+        if iteration > 0:
+            if exc_L * exc_L_prev < 0:
+                w_step *= 0.5
+            if exc_K * exc_K_prev < 0:
+                r_step *= 0.5
 
-    # Also return a sample cross-section for transition initial condition (a,z)
-    # Use the last simulated (a,z) from the last iteration:
-    return dict(w=w, r=r, a=a.copy(), z=z.copy(),
-                Vp=Vp, Vm=Vm, polp=polp, polm=polm,
-                mu_p=mu_p.copy(), mu_m=mu_m.copy(), A=A,
-                Y=Y, K=K, L=L, s_e=s_e, TFP=TFP)
+        w_new = w * (1 + w_step * exc_L)
+        r_new = r + r_step * exc_K
+
+        w_new = max(0.01, min(2.5, w_new))
+        r_new = max(-0.25, min(0.12, r_new))
+
+        damping = 0.5
+        w = damping * w + (1 - damping) * w_new
+        r = damping * r + (1 - damping) * r_new
+
+        exc_L_prev, exc_K_prev = exc_L, exc_K
+
+    agg = best_result['agg']
+    span = 1 - upsilon
+    L_s = 1 - agg['share_entre']
+    TFP = agg['Y'] / max(((agg['K'] ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
+
+    return {
+        'w': best_result['w'], 'r': best_result['r'],
+        'Y': agg['Y'], 'K': agg['K'], 'L': agg['L'], 'A': agg['A'],
+        'TFP': TFP, 'extfin': agg['extfin'],
+        'ExtFin_Y': agg['extfin'] / max(agg['Y'], 1e-8),
+        'share_entre': agg['share_entre'],
+        'avg_z_entrep': agg['avg_z_entrep'],
+        'wealth_top5_share': agg['wealth_top5_share'],
+        'dist': best_result['dist'],
+        'policy': best_result['policy'],
+        'V': best_result['V'],
+        'a_grid': a_grid, 'z_grid': z_grid, 'prob_z': prob_z,
+        'exc_L_history': np.array(exc_L_history),
+        'exc_K_history': np.array(exc_K_history),
+    }
 
 # =============================================================================
-# Transition path solver (Algorithm B.2)
+# GE Solver - WITH Distortions
 # =============================================================================
-def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026, verbose=True):
+
+def find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
+                                tau_plus, tau_minus,
+                                w_init=0.80, r_init=-0.04,
+                                V_plus_init=None, V_minus_init=None,
+                                max_iter=100, tol=1e-3, verbose=True):
+    """Find stationary equilibrium WITH distortions"""
+    delta, alpha, upsilon, lam, beta, sigma, psi = params
+
+    w, r = w_init, r_init
+    V_plus, V_minus = V_plus_init, V_minus_init
+    w_step, r_step = 0.3, 0.05
+    exc_L_prev, exc_K_prev = 0.0, 0.0
+
+    best_error = np.inf
+    best_result = None
+
+    exc_L_history = []
+    exc_K_history = []
+
+    for iteration in range(max_iter):
+        # Precompute for both tau states
+        (_, k_plus, l_plus, out_plus, is_plus, inc_plus) = precompute_entrepreneur_with_tau(
+            a_grid, z_grid, tau_plus, w, r, lam, delta, alpha, upsilon
+        )
+        (_, k_minus, l_minus, out_minus, is_minus, inc_minus) = precompute_entrepreneur_with_tau(
+            a_grid, z_grid, tau_minus, w, r, lam, delta, alpha, upsilon
+        )
+
+        # Solve COUPLED VFI for both tau states
+        V_plus, V_minus, policy_plus, policy_minus = solve_value_function_coupled(
+            a_grid, z_grid, prob_z, prob_tau_plus,
+            inc_plus, inc_minus, beta, sigma, psi,
+            V_p_init=V_plus, V_m_init=V_minus
+        )
+
+        # Compute distribution
+        mu_plus, mu_minus = compute_stationary_with_dist(
+            policy_plus, policy_minus, a_grid, z_grid, prob_z, prob_tau_plus, psi
+        )
+
+        # Aggregates
+        agg = compute_aggregates_with_dist(
+            mu_plus, mu_minus, a_grid, z_grid, prob_z,
+            is_plus, k_plus, l_plus, out_plus,
+            is_minus, k_minus, l_minus, out_minus
+        )
+
+        exc_K = agg['K'] - agg['A']
+        exc_L = agg['L'] - (1 - agg['share_entre'])
+        total_error = abs(exc_L) + abs(exc_K)
+        if verbose:
+            print(f"  [{iteration+1:3d}] w={w:.8f}, r={r:.8f} | K={agg['K']:.6f}, A={agg['A']:.2f} | "
+                  f"Ld={agg['L']:.6f}, Ls={1-agg['share_entre']:.2f} | err={total_error:.8f}")
+
+        if total_error < best_error:
+            best_error = total_error
+            best_result = {
+                'w': w, 'r': r, 'agg': agg.copy(),
+                'mu_plus': mu_plus.copy(), 'mu_minus': mu_minus.copy(),
+                'policy_plus': policy_plus.copy(), 'policy_minus': policy_minus.copy(),
+                'V_plus': V_plus.copy(), 'V_minus': V_minus.copy(),
+            }
+
+        if abs(exc_L) < tol and abs(exc_K) < tol:
+            break
+
+        if iteration > 0:
+            if exc_L * exc_L_prev < 0:
+                w_step *= 0.5
+            if exc_K * exc_K_prev < 0:
+                r_step *= 0.5
+
+        w_new = w * (1 + w_step * exc_L)
+        r_new = r + r_step * exc_K
+
+        w_new = max(0.01, min(2.5, w_new))
+        r_new = max(-0.25, min(0.12, r_new))
+
+        damping = 0.5
+        w = damping * w + (1 - damping) * w_new
+        r = damping * r + (1 - damping) * r_new
+
+        exc_L_prev, exc_K_prev = exc_L, exc_K
+
+    agg = best_result['agg']
+    span = 1 - upsilon
+    L_s = 1 - agg['share_entre']
+    TFP = agg['Y'] / max(((agg['K'] ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
+
+    return {
+        'w': best_result['w'], 'r': best_result['r'],
+        'Y': agg['Y'], 'K': agg['K'], 'L': agg['L'], 'A': agg['A'],
+        'TFP': TFP, 'extfin': agg['extfin'],
+        'ExtFin_Y': agg['extfin'] / max(agg['Y'], 1e-8),
+        'share_entre': agg['share_entre'],
+        'avg_z_entrep': agg['avg_z_entrep'],
+        'wealth_top5_share': agg['wealth_top5_share'],
+        'mu_plus': best_result['mu_plus'],
+        'mu_minus': best_result['mu_minus'],
+        'policy_plus': best_result['policy_plus'],
+        'policy_minus': best_result['policy_minus'],
+        'V_plus': best_result['V_plus'],
+        'V_minus': best_result['V_minus'],
+        'a_grid': a_grid, 'z_grid': z_grid, 'prob_z': prob_z,
+        'prob_tau_plus': prob_tau_plus,
+        'exc_L_history': np.array(exc_L_history),
+        'exc_K_history': np.array(exc_K_history),
+    }
+
+# =============================================================================
+# Transition Path - Backward VFI
+# =============================================================================
+
+def solve_vfi_transition_at_t(a_grid, z_grid, prob_z, income_grid,
+                               beta, sigma, psi, w_tp1, r_tp1,
+                               income_tp1, V_tp1, tol=1e-5, max_iter=200):
     """
-    Implements Appendix Algorithm B.2:
-      outer loop on r_path
-        inner loop on w_path given r_path:
-          backward induction -> policies
-          forward simulation -> μ_t
-          per-period labor clearing -> varpi_t
-          relax update w_path
-        per-period capital clearing -> iota_t
-        relax update r_path
-    Terminal condition: w_T = w_post, r_T = r_post, V_T = V_post.
+    Solve VFI at time t given prices at t and continuation value at t+1.
+    Key: Expected value uses V_{t+1}, not V_t.
     """
     n_a, n_z = len(a_grid), len(z_grid)
 
-    # fixed shocks (common random numbers)
-    resets, shocks = generate_shocks(N, T, PSI, prob_z, seed=seed)
+    # Compute EV using V_{t+1}
+    V_mean_tp1 = np.zeros(n_a)
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            V_mean_tp1[i_a] += prob_z[i_z] * V_tp1[i_a, i_z]
 
-    # initial distribution at t=0
-    a0 = pre_eq["a"].astype(np.float64, copy=False)
-    z0 = pre_eq["z"].astype(np.uint8,  copy=False)
+    EV_tp1 = np.zeros((n_a, n_z))
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            EV_tp1[i_a, i_z] = psi * V_tp1[i_a, i_z] + (1 - psi) * V_mean_tp1[i_a]
 
-    w_pre, r_pre = pre_eq["w"], pre_eq["r"]
-    w_post, r_post = post_eq["w"], post_eq["r"]
+    # Solve for V_t and policy_t
+    V = V_tp1.copy()
+    policy_a_idx = np.zeros((n_a, n_z), dtype=np.int64)
 
-    # price paths with terminal condition at t=T
-    w_path = np.linspace(w_pre, w_post, T + 1).astype(np.float64)
-    r_path = np.linspace(r_pre, r_post, T + 1).astype(np.float64)
-    w_path[T] = w_post
-    r_path[T] = r_post
+    for iteration in range(max_iter):
+        V_new = np.zeros((n_a, n_z))
 
-    V_T = post_eq["V"].astype(np.float64, copy=False)
+        for i_z in range(n_z):
+            start_idx = 0
+            for i_a in range(n_a):
+                income = income_grid[i_a, i_z]
 
-    # storage (filled in last simulation of each wage-iteration)
-    mu_path = np.empty((T, n_a, n_z), dtype=np.float64)
-    A_path = np.empty(T, dtype=np.float64)
+                best_val, best_idx = find_optimal_savings_monotone(
+                    income, a_grid, EV_tp1[:, i_z], beta, sigma, start_idx
+                )
 
-    for outer in range(MAX_OUTER):
-        r_old = r_path.copy()
+                V_new[i_a, i_z] = best_val
+                policy_a_idx[i_a, i_z] = best_idx
+                start_idx = best_idx
 
-        # =========================
-        # Inner loop on wage path
-        # =========================
-        for inner in range(MAX_W_INNER):
-            w_old = w_path.copy()
+        diff = np.max(np.abs(V_new - V))
+        V = V_new
 
-            # backward induction: store policy indices for t=0..T-1
-            pol_idx_path = np.empty((T, n_a, n_z), dtype=np.int32)
-            V_next = V_T.copy()
+        if diff < tol:
+            break
 
-            for tt in range(T-1, -1, -1):
-                inc_t = precompute_income_no_dist(a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                                  LAMBDA, DELTA, ALPHA, NU)
-                V_t, pol_t = bellman_one_step(V_next, a_grid, z_grid, prob_z, inc_t,
-                                              BETA, SIGMA, PSI)
-                pol_idx_path[tt] = pol_t
-                V_next = V_t
-
-            # Convert policies to levels once
-            pol_a_path = a_grid[pol_idx_path]  # shape (T,n_a,n_z)
-
-            # forward simulate and build μ_t (no storing massive cross-sections)
-            a = a0.copy()
-            z = z0.copy()
-
-            mu_tmp = np.empty((n_a, n_z), dtype=np.float64)
-
-            for tt in range(T):
-                # histogram of current distribution
-                A_path[tt] = fill_mu_az(a, z, a_grid, mu_tmp)
-                mu_path[tt, :, :] = mu_tmp  # copy 20k floats
-                # step forward
-                a, z = simulate_step_nodist(a, z, pol_a_path[tt], a_grid, resets[tt], shocks[tt])
-
-            # per-period labor-clearing wage varpi_t (for t=0..T-1)
-            w_clear = np.empty(T, dtype=np.float64)
-            # warm start sequentially (w is smooth)
-            wg = float(w_path[0])
-            for tt in range(T):
-                wg = solve_w_clear_mu_nodist(mu_path[tt], a_grid, z_grid, float(r_path[tt]), wg)
-                w_clear[tt] = wg
-
-            # relax update (do not touch terminal)
-            w_path[:T] = ETA_W * w_clear + (1.0 - ETA_W) * w_path[:T]
-            w_path[:T] = np.clip(w_path[:T], W_MIN, W_MAX)
-            w_path[T] = w_post
-
-            w_diff = float(np.max(np.abs(w_path - w_old)))
-            if verbose and (inner < 2 or inner % 3 == 0):
-                print(f"[outer {outer+1:02d} | wage {inner+1:02d}] max|Δw|={w_diff:.3e}")
-            if w_diff < TOL_W_SEQ:
-                break
-
-        # =========================
-        # Capital clearing sequence iota_t (t=0..T-1)
-        # =========================
-        r_clear = np.empty(T, dtype=np.float64)
-        rg = float(r_path[0])
-        for tt in range(T):
-            rg = solve_r_clear_mu_nodist(mu_path[tt], float(A_path[tt]), a_grid, z_grid, float(w_path[tt]), rg)
-            r_clear[tt] = rg
-
-        # relax update
-        r_path[:T] = ETA_R * r_clear + (1.0 - ETA_R) * r_path[:T]
-        r_path[:T] = np.clip(r_path[:T], R_MIN, R_MAX)
-        r_path[T] = r_post
-
-        r_diff = float(np.max(np.abs(r_path - r_old)))
-
-        # market-clearing gaps on the *fixed μ_t* from the last simulation
-        # (these go to zero when the fixed point is reached)
-        w_gap = float(np.max(np.abs(w_clear - w_path[:T])))
-        r_gap = float(np.max(np.abs(r_clear - r_path[:T])))
-
-        if verbose:
-            print(f"[outer {outer+1:02d}] max|Δr|={r_diff:.3e}  max|gap_w|={w_gap:.3e}  max|gap_r|={r_gap:.3e}\n")
-
-        if r_diff < TOL_R_SEQ and w_gap < 5 * TOL_W_SEQ and r_gap < 5 * TOL_R_SEQ:
-            # extra safeguard: check residual ED using current prices with the *same μ_t*
-            # (should already be tiny at this point)
-            max_edL = 0.0
-            max_edK = 0.0
-            for tt in range(T):
-                edL = abs(float(labor_excess_mu_nodist(mu_path[tt], a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                                     LAMBDA, DELTA, ALPHA, NU)))
-                edK = abs(float(capital_excess_mu_nodist(mu_path[tt], float(A_path[tt]), a_grid, z_grid,
-                                                       float(w_path[tt]), float(r_path[tt]),
-                                                       LAMBDA, DELTA, ALPHA, NU)))
-                if edL > max_edL:
-                    max_edL = edL
-                if edK > max_edK:
-                    max_edK = edK
-            if verbose:
-                print(f"  residual (fixed-μ) max|ED_L|={max_edL:.3e} max|ED_K|={max_edK:.3e}\n")
-            if max_edL < TOL_ED_L and max_edK < TOL_ED_K:
-                if verbose:
-                    print(f"CONVERGED outer loop after {outer+1} iterations.\n")
-                break
-
-    # =========================
-    # Final evaluation: recompute policies & simulate once more using final sequences
-    # =========================
-    pol_idx_path = np.empty((T, n_a, n_z), dtype=np.int32)
-    V_next = V_T.copy()
-    for tt in range(T-1, -1, -1):
-        inc_t = precompute_income_no_dist(a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                          LAMBDA, DELTA, ALPHA, NU)
-        V_t, pol_t = bellman_one_step(V_next, a_grid, z_grid, prob_z, inc_t, BETA, SIGMA, PSI)
-        pol_idx_path[tt] = pol_t
-        V_next = V_t
-    pol_a_path = a_grid[pol_idx_path]
-
-    a = a0.copy()
-    z = z0.copy()
-
-    mu_tmp = np.empty((n_a, n_z), dtype=np.float64)
-    mu_path_final = np.empty((T, n_a, n_z), dtype=np.float64)
-    A_path_final = np.empty(T, dtype=np.float64)
-
-    for tt in range(T):
-        A_path_final[tt] = fill_mu_az(a, z, a_grid, mu_tmp)
-        mu_path_final[tt] = mu_tmp
-        a, z = simulate_step_nodist(a, z, pol_a_path[tt], a_grid, resets[tt], shocks[tt])
-
-    # aggregates and ED
-    Y = np.empty(T, dtype=np.float64)
-    K = np.empty(T, dtype=np.float64)
-    L = np.empty(T, dtype=np.float64)
-    s_e = np.empty(T, dtype=np.float64)
-    TFP = np.empty(T, dtype=np.float64)
-    ED_L = np.empty(T, dtype=np.float64)
-    ED_K = np.empty(T, dtype=np.float64)
-
-    span = 1.0 - NU
-    for tt in range(T):
-        Kt, Lt, Yt, se = aggregates_mu_nodist(mu_path_final[tt], float(A_path_final[tt]),
-                                             a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                             LAMBDA, DELTA, ALPHA, NU)
-        Y[tt] = Yt
-        K[tt] = Kt
-        L[tt] = Lt
-        s_e[tt] = se
-        Ls = 1.0 - se
-        TFP[tt] = Yt / max(((Kt ** ALPHA) * (Ls ** (1.0 - ALPHA))) ** span, 1e-12)
-        ED_L[tt] = Lt - Ls
-        ED_K[tt] = Kt - A_path_final[tt]
-
-    return dict(t=np.arange(T+1), w=w_path, r=r_path,
-                Y=Y, K=K, L=L, A=A_path_final, s_e=s_e, TFP=TFP,
-                ED_L=ED_L, ED_K=ED_K)
+    return V, policy_a_idx
 
 # =============================================================================
-# Data Saving
+# Transition Path - Forward Distribution Update
 # =============================================================================
-def plot_asset_grid_distribution(a_grid, outdir):
-    """
-    Plots the distribution of asset grid points to visualize the power spacing.
-    """
-    os.makedirs(outdir, exist_ok=True)
+
+def update_distribution_forward(dist_t, policy_t, a_grid, z_grid, prob_z, psi):
+    """Update distribution from t to t+1"""
+    n_a, n_z = len(a_grid), len(z_grid)
+    dist_next = np.zeros((n_a, n_z))
+
+    for i_a in range(n_a):
+        for i_z in range(n_z):
+            mass = dist_t[i_a, i_z]
+            if mass < 1e-14:
+                continue
+
+            i_a_prime = policy_t[i_a, i_z]
+
+            for i_z_prime in range(n_z):
+                if i_z_prime == i_z:
+                    p = psi + (1 - psi) * prob_z[i_z_prime]
+                else:
+                    p = (1 - psi) * prob_z[i_z_prime]
+
+                if p > 1e-14:
+                    dist_next[i_a_prime, i_z_prime] += mass * p
+
+    return dist_next / dist_next.sum()
+
+# =============================================================================
+# Time Path Iteration (TPI)
+# =============================================================================
+
+def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
+                     eta_w=0.3, eta_r=0.02, theta=0.5, tol=5e-3, max_iter=50):
+    """Solve transition path via TPI"""
+    delta, alpha, upsilon, lam, beta, sigma, psi = params
+
+    a_grid = post_eq['a_grid']
+    z_grid = post_eq['z_grid']
+    prob_z = post_eq['prob_z']
+    n_a, n_z = len(a_grid), len(z_grid)
+
+    w_pre, r_pre = pre_eq['w'], pre_eq['r']
+    w_post, r_post = post_eq['w'], post_eq['r']
+
+    # Initial distribution: marginal over tau
+    mu_0 = pre_eq['mu_plus'] + pre_eq['mu_minus']
+    mu_0 /= mu_0.sum()
+
+    # Terminal
+    V_post = post_eq['V']
+    policy_post = post_eq['policy']
+
+    # Initialize price paths
+    t_arr = np.arange(T)
+    w_path = w_post + (w_pre - w_post) * np.exp(-kappa * t_arr)
+    r_path = r_post + (r_pre - r_post) * np.exp(-kappa * t_arr)
+
+    print(f"\n{'='*70}")
+    print("TRANSITION PATH ITERATION (Howard PI)")
+    print(f"{'='*70}")
+    print(f"T = {T}, Initial: w_pre={w_pre:.4f}, r_pre={r_pre:.4f}")
+    print(f"Target: w_post={w_post:.4f}, r_post={r_post:.4f}")
+    print(f"{'='*70}\n")
+
+    # Storage
+    Y_path = np.zeros(T)
+    K_path = np.zeros(T)
+    L_path = np.zeros(T)
+    A_path = np.zeros(T)
+    TFP_path = np.zeros(T)
+    ExtFin_path = np.zeros(T)
+    Entre_path = np.zeros(T)
+    AvgZ_path = np.zeros(T)
+    WealthTop5_path = np.zeros(T)
+    I_path = np.zeros(T)
+    ED_L_path = np.zeros(T)
+    ED_K_path = np.zeros(T)
+
+    for tpi_iter in range(max_iter):
+        # =================================================================
+        # BACKWARD: Solve policies
+        # =================================================================
+        policies = [None] * T
+        V_list = [None] * T
+
+        # Pre-compute income grids for all t
+        income_list = []
+        kstar_list = []
+        lstar_list = []
+        output_list = []
+        is_entrep_list = []
+
+        for t in range(T):
+            (_, kstar, lstar, output, is_entrep, income) = precompute_entrepreneur_all(
+                a_grid, z_grid, w_path[t], r_path[t], lam, delta, alpha, upsilon
+            )
+            income_list.append(income)
+            kstar_list.append(kstar)
+            lstar_list.append(lstar)
+            output_list.append(output)
+            is_entrep_list.append(is_entrep)
+
+        # Terminal
+        policies[T-1] = policy_post.copy()
+        V_list[T-1] = V_post.copy()
+
+        # Backward iteration
+        for t in range(T-2, -1, -1):
+            V_tp1 = V_list[t+1]
+            income_tp1 = income_list[t+1] if t+1 < T else income_list[-1]
+
+            V_t, policy_t = solve_vfi_transition_at_t(
+                a_grid, z_grid, prob_z, income_list[t],
+                beta, sigma, psi, w_path[t+1], r_path[t+1],
+                income_tp1, V_tp1
+            )
+
+            policies[t] = policy_t
+            V_list[t] = V_t
+
+        # =================================================================
+        # FORWARD: Update distributions and compute aggregates
+        # =================================================================
+        dist_t = mu_0.copy()
+
+        for t in range(T):
+            agg = compute_aggregates(
+                dist_t, a_grid, z_grid, prob_z, is_entrep_list[t],
+                kstar_list[t], lstar_list[t], output_list[t]
+            )
+
+            K_path[t] = agg['K']
+            L_path[t] = agg['L']
+            Y_path[t] = agg['Y']
+            A_path[t] = agg['A']
+            ExtFin_path[t] = agg['extfin']
+            Entre_path[t] = agg['share_entre']
+            AvgZ_path[t] = agg['avg_z_entrep']
+            WealthTop5_path[t] = agg['wealth_top5_share']
+
+            span = 1 - upsilon
+            L_s = 1 - agg['share_entre']
+            TFP_path[t] = agg['Y'] / max(((agg['K'] ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
+
+            ED_L_path[t] = (agg['L'] - L_s) / max(L_s, 0.05)
+            ED_K_path[t] = (agg['K'] - agg['A']) / max(agg['A'], 1.0)
+
+            if t < T - 1:
+                dist_t = update_distribution_forward(dist_t, policies[t], a_grid, z_grid, prob_z, psi)
+
+        # =================================================================
+        # COMPUTE INVESTMENT RATE
+        # =================================================================
+        I_val = np.zeros(T)
+        for t in range(T-1):
+            I_val[t] = K_path[t+1] - (1 - delta) * K_path[t]
+        I_val[T-1] = post_eq['K'] - (1 - delta) * K_path[T-1]
+        I_Y_path = I_val / np.maximum(Y_path, 1e-8)
+
+        # =================================================================
+        # CHECK CONVERGENCE
+        # =================================================================
+        max_ED = max(np.max(np.abs(ED_L_path)), np.max(np.abs(ED_K_path)))
+
+        if tpi_iter % 5 == 0 or tpi_iter < 3:
+            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.8f}, "
+                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.8f}, total_err={max_ED:.8f}")
+
+        if max_ED < tol:
+            print(f"\n[CONVERGED] after {tpi_iter+1} iterations")
+            break
+
+        # =================================================================
+        # UPDATE PRICES
+        # =================================================================
+        w_path_new = w_path * (1 + eta_w * ED_L_path)
+        r_path_new = r_path + eta_r * ED_K_path
+
+        # Smooth
+        window = 5
+        for t in range(window, T - window):
+            w_path_new[t] = 0.7 * w_path_new[t] + 0.3 * np.mean(w_path_new[t-window:t+window])
+            r_path_new[t] = 0.7 * r_path_new[t] + 0.3 * np.mean(r_path_new[t-window:t+window])
+
+        # Enforce terminal
+        decay_len = min(20, T//10)
+        w_path_new[-decay_len:] = w_post + (w_path_new[-decay_len] - w_post) * np.exp(-0.3 * np.arange(decay_len))
+        r_path_new[-decay_len:] = r_post + (r_path_new[-decay_len] - r_post) * np.exp(-0.3 * np.arange(decay_len))
+
+        # Damped update
+        w_path = (1 - theta) * w_path + theta * w_path_new
+        r_path = (1 - theta) * r_path + theta * r_path_new
+
+    return {
+        't': np.arange(T),
+        'w': w_path, 'r': r_path,
+        'Y': Y_path, 'K': K_path, 'L': L_path, 'A': A_path,
+        'TFP': TFP_path, 'ExtFin': ExtFin_path,
+        'ExtFin_Y': ExtFin_path / np.maximum(Y_path, 1e-8),
+        'Entre_share': Entre_path,
+        'AvgZ': AvgZ_path,
+        'WealthTop5': WealthTop5_path,
+        'I_Y': I_Y_path,
+        'ED_L': ED_L_path, 'ED_K': ED_K_path,
+    }
+
+# =============================================================================
+# Output and Plotting
+# =============================================================================
+
+def save_results(pre_eq, post_eq, trans, output_dir='outputs'):
+    os.makedirs(output_dir, exist_ok=True)
+
+    for name, eq in [('stationary_pre', pre_eq), ('stationary_post', post_eq)]:
+        summary = {k: float(v) if isinstance(v, (int, float, np.floating)) else None
+                   for k, v in eq.items() if not isinstance(v, np.ndarray)}
+        with open(os.path.join(output_dir, f'{name}_v3.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
+
+    import csv
+    with open(os.path.join(output_dir, 'transition_v3.csv'), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['t', 'w', 'r', 'Y', 'K', 'L', 'A', 'TFP', 'ext_fin_Y', 'entrepreneur_share', 'avg_z_entrep', 'wealth_top5_share', 'I_Y'])
+        for i in range(len(trans['t'])):
+            writer.writerow([trans['t'][i], trans['w'][i], trans['r'][i], trans['Y'][i],
+                           trans['K'][i], trans['L'][i], trans['A'][i], trans['TFP'][i],
+                           trans['ExtFin_Y'][i], trans['Entre_share'][i],
+                           trans['AvgZ'][i], trans['WealthTop5'][i], trans['I_Y'][i]])
+
+    print(f"\nResults saved to {output_dir}/")
+
+def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
+    os.makedirs(output_dir, exist_ok=True)
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    # Premium Styling Parameters
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'legend.fontsize': 10,
+        'figure.titlesize': 16,
+        'grid.alpha': 0.3,
+        'lines.linewidth': 2.5
+    })
     
-    # 1. Index vs Value (Shows the curvature/power function)
-    ax1.plot(np.arange(len(a_grid)), a_grid, 'b.-', markersize=3)
-    ax1.set_title("Grid Spacing: Index vs Value")
-    ax1.set_xlabel("Grid Index i")
-    ax1.set_ylabel("Asset Value a[i]")
-    ax1.grid(True, alpha=0.3)
+    # Use a cleaner color palette
+    c_blue = '#004488'
+    c_red = '#BB5566'
+    c_green = '#228833'
+    c_grey = '#888888'
+
+    # Padding settings: -4 to 20
+    T_limit = 20
+    limit_idx = np.where(trans['t'] == T_limit)[0][0] + 1
+    t_plot = np.concatenate([np.arange(-4, 0), trans['t'][:limit_idx]])
     
-    # 2. Histogram of point density (log scale to see small bins)
-    # or just plotting the points on a line
-    ax2.scatter(a_grid, np.zeros_like(a_grid), alpha=0.5, s=10, marker='|')
-    ax2.set_title("Grid Point Locations (Density)")
-    ax2.set_xlabel("Asset Value a")
-    ax2.set_yticks([])
-    ax2.set_xlim(0, 50) # Zoom in on the bottom end where density is high
-    ax2.text(0.95, 0.95, "Zoomed to a < 50", transform=ax2.transAxes, ha='right', va='top')
+    def pad(path, pre_val):
+        return np.concatenate([np.full(4, pre_val), path[:limit_idx]])
+
+    Y_pre, K_pre, TFP_pre = pre_eq['Y'], pre_eq['K'], pre_eq['TFP']
+    I_Y_pre = (DELTA * K_pre) / max(Y_pre, 1e-8)
+
+    # Prepare padded paths
+    Y_path_plot = pad(trans['Y'], Y_pre) / Y_pre
+    TFP_path_plot = pad(trans['TFP'], TFP_pre) / TFP_pre
+    r_path_plot = pad(trans['r'], pre_eq['r'])
+    w_path_plot = pad(trans['w'], pre_eq['w']) / pre_eq['w']
+    I_path_plot = pad(trans['I_Y'], I_Y_pre) - I_Y_pre
+    K_path_plot = pad(trans['K'], K_pre) / K_pre
+    
+    AvgZ_path_plot = pad(trans['AvgZ'], pre_eq['avg_z_entrep']) / pre_eq['avg_z_entrep']
+    WealthTop5_path_plot = pad(trans['WealthTop5'], pre_eq['wealth_top5_share'])
+
+    # -------------------------------------------------------------------------
+    # Figure 1: Aggregate Dynamics (Paper Figs 3 & 4 style)
+    # -------------------------------------------------------------------------
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+    # Output (Normalized by Pre)
+    axes[0,0].plot(t_plot, Y_path_plot, 'b-', lw=2, label=f'λ={LAMBDA}')
+    axes[0,0].axvline(0, color='k', ls='-', alpha=0.3) # Shock line
+    axes[0,0].axhline(post_eq['Y']/Y_pre, color='r', ls='--', alpha=0.7, label='Post SS')
+    axes[0,0].axhline(1.0, color='g', ls=':', alpha=0.7, label='Pre SS')
+    axes[0,0].set_xlabel('Period'); axes[0,0].set_ylabel('Y / Y_pre')
+    axes[0,0].set_title('Output (GDP)'); axes[0,0].grid(True, alpha=0.3); axes[0,0].legend()
+
+    # TFP (Normalized by Pre)
+    axes[0,1].plot(t_plot, TFP_path_plot, 'b-', lw=2)
+    axes[0,1].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[0,1].axhline(post_eq['TFP']/TFP_pre, color='r', ls='--')
+    axes[0,1].axhline(1.0, color='g', ls=':')
+    axes[0,1].set_xlabel('Period'); axes[0,1].set_ylabel('TFP / TFP_pre')
+    axes[0,1].set_title('TFP Measure'); axes[0,1].grid(True, alpha=0.3)
+
+    # Interest Rate
+    axes[0,2].plot(t_plot, r_path_plot, 'b-', lw=2)
+    axes[0,2].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[0,2].axhline(post_eq['r'], color='r', ls='--')
+    axes[0,2].axhline(pre_eq['r'], color='g', ls=':')
+    axes[0,2].set_xlabel('Period'); axes[0,2].set_ylabel('r')
+    axes[0,2].set_title('Interest Rate'); axes[0,2].grid(True, alpha=0.3)
+
+    # Wage (Normalized by Pre)
+    axes[1,0].plot(t_plot, w_path_plot, 'b-', lw=2)
+    axes[1,0].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[1,0].axhline(post_eq['w']/pre_eq['w'], color='r', ls='--')
+    axes[1,0].axhline(1.0, color='g', ls=':')
+    axes[1,0].set_xlabel('Period'); axes[1,0].set_ylabel('w / w_pre')
+    axes[1,0].set_title('Real Wage'); axes[1,0].grid(True, alpha=0.3)
+
+    # Investment Rate (Deviation from Pre)
+    axes[1,1].plot(t_plot, I_path_plot, 'b-', lw=2)
+    axes[1,1].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[1,1].axhline(0.0, color='g', ls=':')
+    axes[1,1].axhline((post_eq['K']*DELTA/post_eq['Y']) - I_Y_pre, color='r', ls='--')
+    axes[1,1].set_xlabel('Period'); axes[1,1].set_ylabel('i - i_pre')
+    axes[1,1].set_title('Investment Rate Deviation'); axes[1,1].grid(True, alpha=0.3)
+
+    # Capital Stock (Normalized by Pre)
+    axes[1,2].plot(t_plot, K_path_plot, 'b-', lw=2)
+    axes[1,2].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[1,2].axhline(post_eq['K']/K_pre, color='r', ls='--')
+    axes[1,2].axhline(1.0, color='g', ls=':')
+    axes[1,2].set_xlabel('Period'); axes[1,2].set_ylabel('K / K_pre')
+    axes[1,2].set_title('Capital Stock'); axes[1,2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'transition_aggregates_v3.png'), dpi=300)
+    plt.close()
+
+    # -------------------------------------------------------------------------
+    # Figure 2: Micro-Implications (Paper Fig 5 style)
+    # -------------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Average Entrepreneurial Ability (Normalized by Pre)
+    axes[0].plot(t_plot, AvgZ_path_plot, 'b-', lw=2)
+    axes[0].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[0].axhline(post_eq['avg_z_entrep']/pre_eq['avg_z_entrep'], color='r', ls='--')
+    axes[0].axhline(1.0, color='g', ls=':')
+    axes[0].set_xlabel('Period'); axes[0].set_ylabel('Ability / Ability_pre')
+    axes[0].set_title('Avg. Entrep. Ability'); axes[0].grid(True, alpha=0.3)
+
+    # Wealth share of top 5% ability
+    axes[1].plot(t_plot, WealthTop5_path_plot, 'b-', lw=2)
+    axes[1].axvline(0, color='k', ls='-', alpha=0.3)
+    axes[1].axhline(post_eq['wealth_top5_share'], color='r', ls='--')
+    axes[1].axhline(pre_eq['wealth_top5_share'], color='g', ls=':')
+    axes[1].set_xlabel('Period'); axes[1].set_ylabel('Share')
+    axes[1].set_title('Wealth Share of Top 5% Ability'); axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'transition_micro_v3.png'), dpi=300)
+    plt.close()
+
+    print(f"Plots saved to {output_dir}/")
+
+def plot_convergence_diagnostics(pre_eq, post_eq, output_dir='outputs'):
+    """Plot convergence history for pre and post stationary equilibria"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Pre-reform and Post-reform converge diagnostics
+    # Note: trans doesn't have TPI history yet, but we have pre/post
+    
+    if 'exc_L_history' in pre_eq:
+        iters = np.arange(1, len(pre_eq['exc_L_history']) + 1)
+        axes[0].plot(iters, pre_eq['exc_L_history'], 'b-', label='Exc. Labor (Pre)')
+        axes[0].plot(iters, pre_eq['exc_K_history'], 'r-', label='Exc. Capital (Pre)')
+    
+    if 'exc_L_history' in post_eq:
+        iters = np.arange(1, len(post_eq['exc_L_history']) + 1)
+        axes[1].plot(iters, post_eq['exc_L_history'], 'b--', label='Exc. Labor (Post)')
+        axes[1].plot(iters, post_eq['exc_K_history'], 'r--', label='Exc. Capital (Post)')
+        
+    for ax in axes:
+        ax.axhline(0, color='black', lw=1)
+        ax.set_yscale('symlog', linthresh=1e-3)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Excess Demand')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+    axes[0].set_title('Convergence: Pre-reform Baseline')
+    axes[1].set_title('Convergence: Post-reform Steady State')
     
     plt.tight_layout()
-    path = os.path.join(outdir, "asset_grid_distribution.png")
-    plt.savefig(path, dpi=150)
+    plt.savefig(os.path.join(output_dir, 'convergence_diagnostics_v3.png'), dpi=200)
     plt.close()
-    print(f"Saved grid distribution plot: {path}")
 
-def save_steady_states(pre_eq, post_eq, a_grid, z_grid, outdir):
-    """
-    Saves steady state results immediately (for policy plotting).
-    """
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "steady_states.npz")
-    
-    # Extract policies (unpack dictionaries if needed or save whole dict)
-    # We save specific arrays needed for plotting
-    np.savez_compressed(path,
-                        # Grids
-                        a_grid=a_grid,
-                        z_grid=z_grid,
-                        # Post-Reform
-                        post_w=post_eq['w'],
-                        post_r=post_eq['r'],
-                        post_pol=post_eq['pol'], # indices
-                        post_mu=post_eq['mu'],
-                        # Pre-Reform
-                        pre_w=pre_eq['w'],
-                        pre_r=pre_eq['r'],
-                        pre_polp=pre_eq['polp'],
-                        pre_polm=pre_eq['polm'],
-                        pre_mu_p=pre_eq['mu_p'],
-                        pre_mu_m=pre_eq['mu_m']
-                        )
-    print(f"Saved steady state results to: {path}")
+def print_summary(pre_eq, post_eq, trans):
+    print("\n" + "="*70)
+    print("RESULTS SUMMARY (Howard PI Version)")
+    print("="*70)
+    print(f"\n{'Variable':<20} {'Pre-Reform':>15} {'Post-Reform':>15} {'Change %':>12}")
+    print("-"*62)
 
-def save_transition_path(trans, pre_eq, post_eq, outdir):
-    """
-    Saves transition path simulation results.
-    """
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "transition_path.npz")
-    
-    np.savez_compressed(path,
-                        t=trans['t'],
-                        Y=trans['Y'],
-                        K=trans['K'],
-                        L=trans['L'],
-                        TFP=trans['TFP'],
-                        w=trans['w'],
-                        r=trans['r'],
-                        ED_L=trans['ED_L'],
-                        ED_K=trans['ED_K'],
-                        # Save pre-SS levels for normalization
-                        pre_Y=pre_eq['Y'],
-                        pre_K=pre_eq['K'],
-                        pre_L=pre_eq['L'],
-                        pre_TFP=pre_eq['TFP'],
-                        pre_w=pre_eq['w'],
-                        pre_r=pre_eq['r'],
-                        )
-    print(f"Saved transition path results to: {path}")
+    for name, key in [('Output (Y)', 'Y'), ('TFP', 'TFP'), ('Capital (K)', 'K'),
+                      ('Assets (A)', 'A'), ('Wage (w)', 'w'), ('Interest Rate (r)', 'r'),
+                      ('Share Entre', 'share_entre'), ('Avg. Ability', 'avg_z_entrep'),
+                      ('Top 5% Wealth', 'wealth_top5_share')]:
+        pre_v, post_v = pre_eq[key], post_eq[key]
+        chg = (post_v - pre_v) / abs(pre_v) * 100 if pre_v != 0 else 0
+        print(f"{name:<20} {pre_v:>15.4f} {post_v:>15.4f} {chg:>11.2f}%")
+
+    print("\nSanity Checks:")
+    print(f"  TFP change: {'[PASS] increases' if post_eq['TFP'] > pre_eq['TFP'] else '[WARN] decreases'}")
+    print(f"  Y change: {'[PASS] increases' if post_eq['Y'] > pre_eq['Y'] else '[WARN] decreases'}")
+    print("="*70)
 
 # =============================================================================
 # Main
 # =============================================================================
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--T", type=int, default=125, help="Horizon length (paper uses 125)")
-    parser.add_argument("--N", type=int, default=350000, help="Number of simulated agents")
-    parser.add_argument("--burn", type=int, default=500, help="Burn-in length for steady states")
-    parser.add_argument("--na", type=int, default=601, help="Asset grid points")
-    parser.add_argument("--amax", type=float, default=300.0, help="Asset grid max")
-    parser.add_argument("--out", type=str, default="outputs_B2_fast", help="Output directory")
-    parser.add_argument("--quiet", action="store_true", help="Reduce prints")
+    parser = argparse.ArgumentParser(description='Buera & Shin Transition (Howard PI)')
+    parser.add_argument('--T', type=int, default=250, help='Transition horizon')
+    parser.add_argument('--na', type=int, default=N_A, help='Asset grid points')
+    parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory')
     args = parser.parse_args()
 
-    verbose = not args.quiet
-    os.makedirs(args.out, exist_ok=True)
+    print("="*70)
+    print("BUERA & SHIN (2010) TRANSITION DYNAMICS")
+    print("Howard Policy Iteration Version (based on v3)")
+    print("="*70)
+    print(f"\nParameters: lambda={LAMBDA}, tau_plus={TAU_PLUS}, tau_minus={TAU_MINUS}, q={Q_DIST}")
+    print(f"Grid: na={args.na}, Transition horizon T={args.T}")
+    print("="*70)
 
-    print("Building grids...")
-    z_grid, prob_z = create_ability_grid_paper(ETA, zmax_target=3.5)
-    a_grid = create_asset_grid(args.na, 1e-10, args.amax, power=2.0)
+    t_start = time.time()
+
+    # Setup grids
+    z_grid, prob_z = create_ability_grid_paper(ETA)
+    a_grid = create_asset_grid(args.na, A_MIN, A_MAX)
     prob_tau_plus = compute_tau_probs(z_grid, Q_DIST)
 
-    # Plot grid immediately
-    plot_asset_grid_distribution(a_grid, args.out)
+    params = (DELTA, ALPHA, NU, LAMBDA, BETA, SIGMA, PSI)
 
-    print("\nSTEP 1: Post-reform steady state (no distortions)")
-    post = steady_state_post(a_grid, z_grid, prob_z, N=args.N, burn=args.burn, verbose=verbose)
-    print(f"Post SS: w={post['w']:.6f}, r={post['r']:.6f}, ED check: |K-A|={abs(post['K']-post['A']):.3e}\n")
+    # JIT warmup
+    print("\nWarming up JIT...")
+    _ = solve_entrepreneur_single(1.0, 1.5, 1.0, 0.04, LAMBDA, DELTA, ALPHA, NU)
+    _ = solve_entrepreneur_with_tau(1.0, 1.5, 0.5, 1.0, 0.04, LAMBDA, DELTA, ALPHA, NU)
+    print("JIT warmup done.")
 
-    print("STEP 2: Pre-reform steady state (distortions) — initial distribution at t=0")
-    pre = steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N=args.N, burn=args.burn, verbose=verbose)
-    print(f"Pre  SS: w={pre['w']:.6f}, r={pre['r']:.6f}, ED check approx: |K-A|={abs(pre['K']-pre['A']):.3e}\n")
+    # Step 1: Post-reform (no distortions)
+    print("\n" + "="*70)
+    print("STEP 1: Post-reform Stationary Equilibrium (NO distortions)")
+    print("="*70)
+    post_eq = find_equilibrium_nodist(a_grid, z_grid, prob_z, params,
+                                       w_init=0.80, r_init=-0.04)
+    print(f"\nPost-reform: w={post_eq['w']:.4f}, r={post_eq['r']:.4f}, Y={post_eq['Y']:.4f}, TFP={post_eq['TFP']:.4f}")
 
-    # Save steady states immediately as requested
-    save_steady_states(pre, post, a_grid, z_grid, args.out)
+    # Step 2: Pre-reform (with distortions)
+    print("\n" + "="*70)
+    print("STEP 2: Pre-reform Stationary Equilibrium (WITH distortions)")
+    print("="*70)
+    pre_eq = find_equilibrium_with_dist(a_grid, z_grid, prob_z, prob_tau_plus, params,
+                                         TAU_PLUS, TAU_MINUS,
+                                         w_init=post_eq['w'], r_init=post_eq['r'])
+    print(f"\nPre-reform: w={pre_eq['w']:.4f}, r={pre_eq['r']:.4f}, Y={pre_eq['Y']:.4f}, TFP={pre_eq['TFP']:.4f}")
 
-    print("STEP 3: Transition path via Appendix Algorithm B.2 (reform at t=0)")
-    trans = solve_transition_B2(pre, post, a_grid, z_grid, prob_z, T=args.T, N=args.N, verbose=verbose)
+    # Step 3: Transition
+    print("\n" + "="*70)
+    print("STEP 3: Transition Dynamics (TPI)")
+    print("="*70)
+    trans = solve_transition(pre_eq, post_eq, params, T=args.T)
 
-    # final diagnostics
-    max_edL = float(np.max(np.abs(trans["ED_L"])))
-    max_edK = float(np.max(np.abs(trans["ED_K"])))
-    print(f"Transition diagnostics: max|ED_L|={max_edL:.3e}, max|ED_K|={max_edK:.3e}")
+    print(f"\nTotal time: {time.time() - t_start:.1f}s")
 
-    # Save transition results
-    save_transition_path(trans, pre, post, args.out)
+    # Save and plot
+    save_results(pre_eq, post_eq, trans, args.output_dir)
+    plot_transition(pre_eq, post_eq, trans, args.output_dir)
+    plot_convergence_diagnostics(pre_eq, post_eq, args.output_dir)
+    print_summary(pre_eq, post_eq, trans)
 
-if __name__ == "__main__":
+    return pre_eq, post_eq, trans
+
+if __name__ == '__main__':
     main()

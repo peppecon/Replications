@@ -1,16 +1,19 @@
 """
-Buera & Shin (2010) Transition Dynamics - Version 2 (Spectral + Nested Solver)
-==============================================================================
+Buera & Shin (2010) Transition Dynamics with Idiosyncratic Distortions
+======================================================================
 
-This script combines:
-1. Spectral Chebyshev Methods (from v1/v6) for high-precision policy approx.
-2. Nested Price Clearing Algorithm (from Appendix B.2) for GE and Transition.
-3. Pareto distribution covering the full population (z_min=1.0).
+This script builds on buera_shin_v6_chebyshev.py (which works perfectly for stationary equilibrium)
+and adds:
+1. Distortions mode for pre-reform stationary equilibrium
+2. Transition path computation via Time Path Iteration (TPI)
 
-Key Algorithm (B.2 Transition):
-- Outer loop: Iterates over the path of interest rates {r_t}.
-- Inner loop: Iterates over the path of wages {w_t}.
-- Per-period bisections: Use fixed-point distribution logic to clear markets.
+Computes:
+1. Pre-reform stationary equilibrium: lambda=1.35 with idiosyncratic output wedges
+2. Post-reform stationary equilibrium: lambda=1.35 without distortions (tau=0)
+3. Perfect-foresight transition path
+
+Usage:
+    python transition_buera_shin.py --T 250
 """
 
 import numpy as np
@@ -26,13 +29,13 @@ import argparse
 import warnings
 import time
 
-# Import from the working library (make sure it exists in path)
+# Import from the working v6 code
 from library.functions_library import Chebyshev_Nodes, Chebyshev_Polynomials_Recursion_mv
 
 warnings.filterwarnings('ignore')
 
 # =============================================================================
-# Model Parameters
+# Model Parameters (from v6 + distortion parameters)
 # =============================================================================
 SIGMA = 1.5      # Risk aversion
 BETA = 0.904     # Discount factor
@@ -50,19 +53,18 @@ TAU_PLUS = 0.57      # Tax rate (positive wedge)
 TAU_MINUS = -0.15    # Subsidy rate (negative wedge)
 Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 
-# Global Grid Bounds (Spectral)
-A_MIN, A_MAX = 1e-6, 200.0
+# Global Grid Bounds (from v6)
+A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0
-Z_MIN, Z_MAX = 1.0, (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 15
-N_CHEBY_Z = 15
-MAX_ITER_POLICY = 100  # Spectral policy solver max iterations
+Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
+N_CHEBY_A = 10
+N_CHEBY_Z = 10
 
 # =============================================================================
-# Bivariate Spectral Tools
+# Bivariate Spectral Tools (from v6)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max):
     na, nz = N_CHEBY_A, N_CHEBY_Z
     la = np.log(a + A_SHIFT)
@@ -85,147 +87,6 @@ def bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max):
         val += Ta[i] * row_sum
 
     return max(a_min, min(val, a_max))
-
-def plot_policy_2d(coeffs, iteration, name="post", outdir="plots", coeffs_alt=None):
-    if not os.path.exists(outdir): os.makedirs(outdir, exist_ok=True)
-    limit_a = 200.0; nodes_a, nodes_z, _ = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
-    a_dense = np.linspace(A_MIN, limit_a, 500); idx_max = len(nodes_z)-1; idx_med = len(nodes_z)//2
-    z_max = nodes_z[idx_max]; z_med = nodes_z[idx_med]; fig, ax = plt.subplots(figsize=(10, 7))
-    ax.plot([0, limit_a], [0, limit_a], 'k--', alpha=0.3, label='45-degree')
-    def plot_line(c, z, label, color, style, marker_color):
-        pol_dense = np.array([bivariate_eval(aa, z, c, A_MIN, A_MAX, Z_MIN, Z_MAX) for aa in a_dense])
-        ax.plot(a_dense, pol_dense, color=color, linestyle=style, linewidth=2, label=label)
-        pol_nodes = np.array([bivariate_eval(na, z, c, A_MIN, A_MAX, Z_MIN, Z_MAX) for na in nodes_a])
-        mask = nodes_a <= limit_a; ax.scatter(nodes_a[mask], pol_nodes[mask], color=marker_color, s=25, alpha=0.6, edgecolors='k', zorder=5)
-    if coeffs_alt is not None:
-        plot_line(coeffs, z_max, f"Max z: Distorted Type", '#D62728', '-', '#D62728')
-        plot_line(coeffs_alt, z_max, f"Max z: Subsidized Type", '#2CA02C', '-', '#2CA02C')
-        plot_line(coeffs, z_med, f"Med z: Distorted", '#1F77B4', '--', '#1F77B4')
-    else:
-        plot_line(coeffs, z_max, f"Max z ({z_max:.2f})", '#D62728', '-', '#D62728')
-        plot_line(coeffs, z_med, f"Med z ({z_med:.2f})", '#1F77B4', '--', '#1F77B4')
-    ax.set_title(f"Spectral Policy: {name} (Iter {iteration})"); ax.set_xlabel("a"); ax.set_ylabel("a'"); ax.legend(); ax.grid(True, alpha=0.2)
-    save_path = os.path.join(outdir, f"policy_2d_{name}.png"); plt.savefig(save_path, dpi=120); plt.close()
-
-def plot_grid_comparison(outdir="plots"):
-    if not os.path.exists(outdir): os.makedirs(outdir, exist_ok=True)
-    nodes_a, _, _ = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX); na_h = 600
-    a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
-    zoom = min(100.0, A_MAX); plt.style.use('seaborn-v0_8-whitegrid'); fig, ax = plt.subplots(figsize=(12, 5))
-    ax.vlines(a_h[a_h <= zoom], 0, 0.4, color='#457B9D', alpha=0.3, linewidth=0.5, label='Mass Grid')
-    ax.vlines(nodes_a[nodes_a <= zoom], 0, 1.0, color='#E63946', alpha=0.9, linewidth=2.5, label='Chebyshev Nodes')
-    ax.set_title("Multi-Grid Architecture", fontsize=15, fontweight='bold'); ax.set_yticks([]); ax.set_xlim(-1, zoom + 1); ax.legend()
-    plt.tight_layout(); plt.savefig(os.path.join(outdir, "asset_grid_comparison.png"), dpi=200); plt.close()
-
-def plot_policy_comparison(pre_eq, post_eq, output_dir='plots'):
-    if not os.path.exists(output_dir): os.makedirs(output_dir, exist_ok=True)
-    z_grid = pre_eq['z_grid']; limit_a = 200.0; a_dense = np.linspace(A_MIN, limit_a, 500)
-    indices = [0, len(z_grid)//2, len(z_grid)-1]
-    z_vals = [z_grid[i] for i in indices]; colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    labels = [f'Low z ({z_vals[0]:.2f})', f'Med z ({z_vals[1]:.2f})', f'High z ({z_vals[2]:.2f})']
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
-    ax = axes[0] # Pre-reform
-    for i, idx in enumerate(indices):
-        z_val = z_grid[idx]
-        pol_p = np.array([bivariate_eval(aa, z_val, pre_eq['coeffs_plus'], A_MIN, A_MAX, Z_MIN, Z_MAX) for aa in a_dense])
-        ax.plot(a_dense, pol_p, color=colors[i], label=labels[i])
-    ax.plot(a_dense, a_dense, 'k--', alpha=0.3, label='45-degree')
-    ax.set_title("Pre-Reform (Distorted $\\tau^+$ Type)"); ax.set_xlabel("a"); ax.set_ylabel("a'"); ax.set_xlim(0, limit_a); ax.set_ylim(0, limit_a); ax.legend(frameon=False); ax.grid(True, alpha=0.2)
-    ax = axes[1] # Post-reform
-    for i, idx in enumerate(indices):
-        z_val = z_grid[idx]
-        pol = np.array([bivariate_eval(aa, z_val, post_eq['coeffs'], A_MIN, A_MAX, Z_MIN, Z_MAX) for aa in a_dense])
-        ax.plot(a_dense, pol, color=colors[i], label=labels[i])
-    ax.plot(a_dense, a_dense, 'k--', alpha=0.3)
-    ax.set_title("Post-Reform (No Distortion)"); ax.set_xlabel("a"); ax.set_xlim(0, limit_a); ax.legend(frameon=False); ax.grid(True, alpha=0.2)
-    plt.tight_layout(); save_path = os.path.join(output_dir, 'policy_comparison_v2.png')
-    plt.savefig(save_path, dpi=150); plt.close(); print(f"Policy plot saved to {save_path}")
-
-def plot_diagnostics(diagnostics, outdir="plots"):
-    """Plot detailed numerical convergence diagnostics."""
-    if not os.path.exists(outdir): os.makedirs(outdir, exist_ok=True)
-    fig, axes = plt.subplots(3, 2, figsize=(15, 18))
-    
-    # 1. Policy Residuals (History across all solver calls)
-    ax = axes[0, 0]
-    for key, vals in diagnostics['policy_errs'].items():
-        if len(vals) > 0: ax.semilogy(vals, label=f"Pol: {key}", alpha=0.7)
-    ax.set_title("Policy Solver Convergence (Steps)"); ax.set_xlabel("Iteration Step"); ax.set_ylabel("max|diff|")
-    ax.legend(fontsize=7, ncol=2); ax.grid(True, which='both', alpha=0.3)
-    
-    # 2. Stationary Distribution Convergence
-    ax = axes[0, 1]
-    for key, vals in diagnostics['dist_errs'].items():
-        if len(vals) > 0: ax.semilogy(vals, label=key)
-    ax.set_title("Stationary Distribution Convergence"); ax.set_xlabel("Power Iteration Step"); ax.set_ylabel("max|mu_new - mu|")
-    ax.legend(fontsize=8, ncol=2); ax.grid(True, which='both', alpha=0.3)
-    
-    # 3. GE Labor Market (Steady State)
-    ax = axes[1, 0]
-    for key, vals in diagnostics['edL_history'].items():
-        if len(vals) > 0: ax.semilogy(np.abs(vals), label=key)
-    ax.set_title("GE Labor Market Clearing (SS)"); ax.set_xlabel("Wage Bisection Step"); ax.set_ylabel("|ED_L|")
-    ax.legend(fontsize=8, ncol=2); ax.grid(True, which='both', alpha=0.3)
-    
-    # 4. GE Capital Market (Steady State)
-    ax = axes[1, 1]
-    for key, vals in diagnostics['edK_history'].items():
-        if len(vals) > 0: ax.semilogy(np.abs(vals), marker='o', label=key)
-    ax.set_title("GE Capital Market Clearing (SS)"); ax.set_xlabel("Interest Rate Bisection Step"); ax.set_ylabel("|ED_K|")
-    ax.legend(fontsize=8); ax.grid(True, which='both', alpha=0.3)
-    
-    # 5. TPI Sequence Convergence
-    ax = axes[2, 0]
-    if len(diagnostics['tpi_errs_L']) > 0: ax.semilogy(diagnostics['tpi_errs_L'], label='max |ED_L| (path)')
-    if len(diagnostics['tpi_errs_K']) > 0: ax.semilogy(diagnostics['tpi_errs_K'], label='max |ED_K| (path)')
-    ax.set_title("TPI Market Clearing Convergence"); ax.set_xlabel("Outer iteration"); ax.set_ylabel("Max Resid")
-    ax.legend(); ax.grid(True, which='both', alpha=0.3)
-
-    # 6. Price Paths (Guess/Final comparison if possible, or just blank)
-    ax = axes[2, 1]
-    ax.text(0.5, 0.5, "Diagnostic Panel\nFully Detailed", ha='center', va='center', fontsize=14)
-    ax.set_axis_off()
-
-    plt.tight_layout(); save_path = os.path.join(outdir, "convergence_diagnostics.png")
-    plt.savefig(save_path, dpi=150); plt.close()
-    print(f"Numerical diagnostics saved to {save_path}")
-
-def plot_current_policy_status(coeffs, label, outdir="plots", filename="current_policy_snapshot.png"):
-    """Plot a snapshot of the current policy function with a low-asset zoom panel (Overwrites)."""
-    if not os.path.exists(outdir): os.makedirs(outdir, exist_ok=True)
-    
-    nodes_a, nodes_z_full, _ = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
-    z_high = nodes_z_full[-1]; z_med = nodes_z_full[len(nodes_z_full)//2]
-    
-    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
-    
-    # limits for global and zoom
-    limits = [50.0, 5.0]
-    titles = ["Global Status (0-50)", "Zoom low-a (0-5)"]
-    
-    for ax, lim, title in zip(axes, limits, titles):
-        a_dense = np.linspace(A_MIN, lim, 200)
-        ax.plot([0, lim], [0, lim], 'k--', alpha=0.3, label='45-degree')
-        
-        # Policy curves
-        p_high = np.array([bivariate_eval(aa, z_high, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX) for aa in a_dense])
-        p_med = np.array([bivariate_eval(aa, z_med, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX) for aa in a_dense])
-        ax.plot(a_dense, p_high, 'r-', label=f'High z ({z_high:.2f})')
-        ax.plot(a_dense, p_med, 'b-', label=f'Med z ({z_med:.2f})')
-        
-        # Scatter nodes
-        nodes_a_plot = nodes_a[nodes_a <= lim]
-        if len(nodes_a_plot) > 0:
-            dots_high = np.array([bivariate_eval(na, z_high, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX) for na in nodes_a_plot])
-            dots_med = np.array([bivariate_eval(na, z_med, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX) for na in nodes_a_plot])
-            ax.scatter(nodes_a_plot, dots_high, s=100, color='r', edgecolors='k', zorder=5, label='Nodes (High z)')
-            ax.scatter(nodes_a_plot, dots_med, s=100, color='b', edgecolors='k', zorder=5, label='Nodes (Med z)')
-        
-        ax.set_title(f"{title}: {label}"); ax.set_xlabel("a"); ax.set_ylabel("a'"); ax.grid(True, alpha=0.2); ax.legend(fontsize=9)
-        ax.set_xlim(-0.1, lim); ax.set_ylim(-0.1, lim)
-
-    plt.tight_layout(); save_path = os.path.join(outdir, filename)
-    plt.savefig(save_path, dpi=120); plt.close()
 
 def bivariate_eval_matrix(a_vec, z_vec, coeffs, a_min, a_max, z_min, z_max):
     na, nz = N_CHEBY_A, N_CHEBY_Z
@@ -263,46 +124,60 @@ def generate_bivariate_nodes_matrix(a_min, a_max, z_min, z_max):
     return nodes_a, nodes_z, T_full
 
 # =============================================================================
-# Entrepreneur Logic
+# Entrepreneur Logic (with distortion support)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, nu):
+    """Original entrepreneur problem (no distortion)"""
     rental = max(r + delta, 1e-8)
     wage = max(w, 1e-8)
     span = 1 - nu
     exp_k = 1 - (1-alpha)*span
     exp_l = (1-alpha)*span
     k1 = (((alpha*span*z/rental)**exp_k) * (((1-alpha)*span*z/wage)**exp_l)) ** (1/nu)
-    kstar = min(k1, lam * a)
+    kstar = min(k1, 1e8)
+    kstar = min(kstar, lam * a)
     denom = max((z * (kstar**(alpha*span)) * (1-alpha) * span), 1e-12)
     lstar = ((wage / denom)) ** (1 / ((1-alpha)*span - 1))
+    lstar = min(lstar, 1e8)
     output = z * ((kstar**alpha) * (lstar**(1-alpha))) ** span
     profit = output - wage * lstar - rental * kstar
     return profit, kstar, lstar, output
 
-@njit(cache=False)
+@njit(cache=True)
 def solve_entrepreneur_with_tau(a, z, tau, w, r, lam, delta, alpha, nu):
+    """
+    Entrepreneur problem WITH distortion tau.
+    profit = (1-tau)*e*(k^alpha * l^(1-alpha))^(1-nu) - w*l - (r+delta)*k
+
+    Key: use effective ability z_eff = (1-tau)*z
+    """
     z_eff = (1.0 - tau) * z
-    if z_eff <= 0: return -1e10, 0.0, 0.0, 0.0
+    if z_eff <= 0:
+        return -1e10, 0.0, 0.0, 0.0
+
     rental = max(r + delta, 1e-8)
     wage = max(w, 1e-8)
     span = 1 - nu
     exp_k = 1 - (1-alpha)*span
     exp_l = (1-alpha)*span
+
     k1 = (((alpha*span*z_eff/rental)**exp_k) * (((1-alpha)*span*z_eff/wage)**exp_l)) ** (1/nu)
-    kstar = min(k1, lam * a)
+    kstar = min(k1, 1e8)
+    kstar = min(kstar, lam * a)
     denom = max((z_eff * (kstar**(alpha*span)) * (1-alpha) * span), 1e-12)
     lstar = ((wage / denom)) ** (1 / ((1-alpha)*span - 1))
+    lstar = min(lstar, 1e8)
     output = z_eff * ((kstar**alpha) * (lstar**(1-alpha))) ** span
     profit = output - wage * lstar - rental * kstar
     return profit, kstar, lstar, output
 
 # =============================================================================
-# Policy Solvers
+# Policy Solver - No Distortions (from v6)
 # =============================================================================
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def solve_policy_bivariate_update(coeffs, nodes_a, nodes_z, T_az_inv,
                                  beta, sigma, psi, w, r, lam, delta, alpha, nu,
                                  a_min, a_max, z_min, z_max,
@@ -332,53 +207,168 @@ def solve_policy_bivariate_update(coeffs, nodes_a, nodes_z, T_az_inv,
         target_vals[i_n] = max(a_min, min(inc - c_target, a_max))
     return T_az_inv @ target_vals
 
-@njit(cache=False, parallel=True)
+def solve_policy_spectral(params, w, r, coeffs_init=None):
+    """Solve for policy function WITHOUT distortions (from v6)"""
+    delta, alpha, nu, lam, beta, sigma, psi = params
+    nodes_a, nodes_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
+    T_inv = np.linalg.inv(T_full)
+    M_vals = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
+    z_quad = (1 - M_vals)**(-1/ETA)
+    z_w = np.zeros(40)
+    z_w[0] = M_vals[0]
+    z_w[1:] = M_vals[1:] - M_vals[:-1]
+    z_w /= z_w.sum()
+    if coeffs_init is None:
+        flat = np.zeros(len(nodes_a) * len(nodes_z))
+        for i in range(len(flat)):
+            ia, iz = i // len(nodes_z), i % len(nodes_z)
+            p, _, _, _ = solve_entrepreneur_single(nodes_a[ia], nodes_z[iz], w, r, lam, delta, alpha, nu)
+            flat[i] = 0.8 * (max(p, w) + (1+r)*nodes_a[ia])
+        coeffs = T_inv @ flat
+    else:
+        coeffs = coeffs_init
+    for it in range(150):
+        c_new = solve_policy_bivariate_update(coeffs, nodes_a, nodes_z, T_inv,
+                                            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+                                            A_MIN, A_MAX, Z_MIN, Z_MAX, z_quad, z_w)
+        diff = np.max(np.abs(c_new - coeffs))
+        coeffs = 0.8 * coeffs + 0.2 * c_new
+        if diff < 1e-7: break
+    return coeffs
+
+# =============================================================================
+# Policy Solver - WITH Distortions
+# =============================================================================
+
+@njit(cache=True, parallel=True)
 def solve_policy_bivariate_update_with_dist(coeffs_plus, coeffs_minus,
                                             nodes_a, nodes_z, T_az_inv,
                                             beta, sigma, psi, w, r, lam, delta, alpha, nu,
                                             a_min, a_max, z_min, z_max,
                                             quad_z, quad_w, prob_tau_plus_arr,
                                             tau_plus, tau_minus, is_plus):
+    """
+    Policy update for distortion case.
+    is_plus: True for tau_plus policy, False for tau_minus policy
+    """
     tau_curr = tau_plus if is_plus else tau_minus
     coeffs_curr = coeffs_plus if is_plus else coeffs_minus
+
     nz_c = N_CHEBY_Z
     nt = len(nodes_a) * nz_c
     target_vals = np.zeros(nt)
+
     for i_n in prange(nt):
         ia, iz = i_n // nz_c, i_n % nz_c
         a, z = nodes_a[ia], nodes_z[iz]
+
+        # Current income with tau
         p, _, _, _ = solve_entrepreneur_with_tau(a, z, tau_curr, w, r, lam, delta, alpha, nu)
         inc = max(p, w) + (1 + r) * a
+
+        # Current policy guess
         aprime = bivariate_eval(a, z, coeffs_curr, a_min, a_max, z_min, z_max)
         aprime = max(a_min, min(aprime, inc - 1e-6))
+
+        # Expected marginal utility
+        # Persistence branch: stay at (z, tau) with prob psi
         p_p, _, _, _ = solve_entrepreneur_with_tau(aprime, z, tau_curr, w, r, lam, delta, alpha, nu)
         inc_p = max(p_p, w) + (1 + r) * aprime
         app = bivariate_eval(aprime, z, coeffs_curr, a_min, a_max, z_min, z_max)
         mu_pers = max(inc_p - app, 1e-9) ** (-sigma)
+
+        # Redraw branch: with prob 1-psi, draw new (z', tau')
         e_mu_redraw = 0.0
         for k in range(len(quad_z)):
-            zk, ptp_k = quad_z[k], prob_tau_plus_arr[k]
-            # tau_plus mu
-            p_plus, _, _, _ = solve_entrepreneur_with_tau(aprime, zk, tau_plus, w, r, lam, delta, alpha, nu)
-            inc_plus = max(p_plus, w) + (1 + r) * aprime
-            a_plus = bivariate_eval(aprime, zk, coeffs_plus, a_min, a_max, z_min, z_max)
-            mu_plus = max(inc_plus - a_plus, 1e-9) ** (-sigma)
-            # tau_minus mu
-            p_minus, _, _, _ = solve_entrepreneur_with_tau(aprime, zk, tau_minus, w, r, lam, delta, alpha, nu)
-            inc_minus = max(p_minus, w) + (1 + r) * aprime
-            a_minus = bivariate_eval(aprime, zk, coeffs_minus, a_min, a_max, z_min, z_max)
-            mu_minus = max(inc_minus - a_minus, 1e-9) ** (-sigma)
-            e_mu_redraw += quad_w[k] * (ptp_k * mu_plus + (1 - ptp_k) * mu_minus)
+            z_k = quad_z[k]
+            p_tau_plus_k = prob_tau_plus_arr[k]
+
+            # Case: tau' = tau_plus
+            pk_plus, _, _, _ = solve_entrepreneur_with_tau(aprime, z_k, tau_plus, w, r, lam, delta, alpha, nu)
+            ick_plus = max(pk_plus, w) + (1 + r) * aprime
+            akk_plus = bivariate_eval(aprime, z_k, coeffs_plus, a_min, a_max, z_min, z_max)
+            mu_plus = max(ick_plus - akk_plus, 1e-9) ** (-sigma)
+
+            # Case: tau' = tau_minus
+            pk_minus, _, _, _ = solve_entrepreneur_with_tau(aprime, z_k, tau_minus, w, r, lam, delta, alpha, nu)
+            ick_minus = max(pk_minus, w) + (1 + r) * aprime
+            akk_minus = bivariate_eval(aprime, z_k, coeffs_minus, a_min, a_max, z_min, z_max)
+            mu_minus = max(ick_minus - akk_minus, 1e-9) ** (-sigma)
+
+            e_mu_redraw += quad_w[k] * (p_tau_plus_k * mu_plus + (1 - p_tau_plus_k) * mu_minus)
+
         expected_mu = psi * mu_pers + (1 - psi) * e_mu_redraw
         c_target = (beta * (1 + r) * expected_mu) ** (-1.0/sigma)
         target_vals[i_n] = max(a_min, min(inc - c_target, a_max))
+
     return T_az_inv @ target_vals
 
+def solve_policy_spectral_with_dist(params, w, r, tau_plus, tau_minus, q_dist,
+                                     coeffs_plus_init=None, coeffs_minus_init=None):
+    """Solve for policy functions WITH distortions"""
+    delta, alpha, nu, lam, beta, sigma, psi = params
+    nodes_a, nodes_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
+    T_inv = np.linalg.inv(T_full)
+
+    M_vals = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
+    z_quad = (1 - M_vals)**(-1/ETA)
+    z_w = np.zeros(40)
+    z_w[0] = M_vals[0]
+    z_w[1:] = M_vals[1:] - M_vals[:-1]
+    z_w /= z_w.sum()
+
+    # Probability of tau_plus for each z in quadrature
+    prob_tau_plus_arr = 1 - np.exp(-q_dist * z_quad)
+
+    # Initialize coefficients
+    if coeffs_plus_init is None:
+        flat_plus = np.zeros(len(nodes_a) * len(nodes_z))
+        flat_minus = np.zeros(len(nodes_a) * len(nodes_z))
+        for i in range(len(flat_plus)):
+            ia, iz = i // len(nodes_z), i % len(nodes_z)
+            p_plus, _, _, _ = solve_entrepreneur_with_tau(nodes_a[ia], nodes_z[iz], tau_plus, w, r, lam, delta, alpha, nu)
+            p_minus, _, _, _ = solve_entrepreneur_with_tau(nodes_a[ia], nodes_z[iz], tau_minus, w, r, lam, delta, alpha, nu)
+            flat_plus[i] = 0.8 * (max(p_plus, w) + (1+r)*nodes_a[ia])
+            flat_minus[i] = 0.8 * (max(p_minus, w) + (1+r)*nodes_a[ia])
+        coeffs_plus = T_inv @ flat_plus
+        coeffs_minus = T_inv @ flat_minus
+    else:
+        coeffs_plus = coeffs_plus_init
+        coeffs_minus = coeffs_minus_init
+
+    for it in range(150):
+        # Update tau_plus policy
+        c_new_plus = solve_policy_bivariate_update_with_dist(
+            coeffs_plus, coeffs_minus, nodes_a, nodes_z, T_inv,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, z_quad, z_w, prob_tau_plus_arr,
+            tau_plus, tau_minus, True
+        )
+
+        # Update tau_minus policy
+        c_new_minus = solve_policy_bivariate_update_with_dist(
+            coeffs_plus, coeffs_minus, nodes_a, nodes_z, T_inv,
+            beta, sigma, psi, w, r, lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, z_quad, z_w, prob_tau_plus_arr,
+            tau_plus, tau_minus, False
+        )
+
+        diff = max(np.max(np.abs(c_new_plus - coeffs_plus)),
+                   np.max(np.abs(c_new_minus - coeffs_minus)))
+
+        coeffs_plus = 0.8 * coeffs_plus + 0.2 * c_new_plus
+        coeffs_minus = 0.8 * coeffs_minus + 0.2 * c_new_minus
+
+        if diff < 1e-7:
+            break
+
+    return coeffs_plus, coeffs_minus
+
 # =============================================================================
-# Distribution Update
+# Stationary Distribution (from v6, extended for distortions)
 # =============================================================================
 
-@njit(cache=False)
+@njit(cache=True)
 def get_interpolation_weights(x, grid):
     n = len(grid)
     if x <= grid[0]: return 0, 1.0, 0.0
@@ -388,107 +378,124 @@ def get_interpolation_weights(x, grid):
     w2 = (x - grid[idx]) / (grid[idx+1] - grid[idx])
     return idx, 1.0 - w2, w2
 
-@njit(cache=False)
-def update_dist_matrix_nodist(A_prime_mat, dist_t, na, nz, prob_z, psi, a_grid):
-    dist_next = np.zeros((na, nz))
-    for ia in range(na):
-        for iz in range(nz):
-            mass = dist_t[ia, iz]
-            if mass < 1e-14: continue
-            aprime = A_prime_mat[ia, iz]
+def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=None):
+    """Stationary distribution WITHOUT distortions (from v6)"""
+    na, nz = len(a_grid), len(z_grid)
+    n_states = na * nz
+
+    A_prime_mat = bivariate_eval_matrix(a_grid, z_grid, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
+
+    rows, cols, data = [], [], []
+    for i_a in range(na):
+        for i_z in range(nz):
+            s = i_a * nz + i_z
+            aprime = A_prime_mat[i_a, i_z]
             ia_low, w1, w2 = get_interpolation_weights(aprime, a_grid)
-            for izp in range(nz):
-                p_z = (psi + (1-psi)*prob_z[izp]) if izp == iz else (1-psi)*prob_z[izp]
-                if w1 > 1e-9: dist_next[ia_low, izp] += mass * p_z * w1
-                if w2 > 1e-9: dist_next[ia_low+1, izp] += mass * p_z * w2
-    return dist_next / dist_next.sum()
+            for i_zp in range(nz):
+                p_z = (psi + (1-psi)*prob_z[i_zp]) if i_zp == i_z else (1-psi)*prob_z[i_zp]
+                if p_z > 1e-12:
+                    if w1 > 1e-9:
+                        rows.append(ia_low * nz + i_zp); cols.append(s); data.append(p_z * w1)
+                    if w2 > 1e-9:
+                        rows.append((ia_low+1) * nz + i_zp); cols.append(s); data.append(p_z * w2)
+    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+
+    if mu_init is not None:
+        mu = mu_init
+        for _ in range(50):
+            mu_new = Q @ mu
+            if np.max(np.abs(mu_new - mu)) < 1e-9: break
+            mu = mu_new
+        return (mu / mu.sum()).reshape((na, nz))
+
+    try:
+        vals, vecs = eigs(Q, k=1, which='LM')
+        mu = np.abs(vecs[:, 0].real)
+    except:
+        mu = np.ones(n_states) / n_states
+        for _ in range(500):
+            mu_new = Q @ mu
+            if np.max(np.abs(mu_new - mu)) < 1e-10: break
+            mu = mu_new
+    return (mu / mu.sum()).reshape((na, nz))
+
+def compute_stationary_with_dist(coeffs_plus, coeffs_minus, a_grid, z_grid, prob_z,
+                                  prob_tau_plus, psi, mu_init=None):
+    """Stationary distribution WITH distortions"""
+    na, nz = len(a_grid), len(z_grid)
+    n_states = na * nz * 2  # 2 tau states
+
+    A_prime_plus = bivariate_eval_matrix(a_grid, z_grid, coeffs_plus, A_MIN, A_MAX, Z_MIN, Z_MAX)
+    A_prime_minus = bivariate_eval_matrix(a_grid, z_grid, coeffs_minus, A_MIN, A_MAX, Z_MIN, Z_MAX)
+
+    rows, cols, data = [], [], []
+
+    for i_a in range(na):
+        for i_z in range(nz):
+            for i_tau in range(2):  # 0=plus, 1=minus
+                s = i_a * nz * 2 + i_z * 2 + i_tau
+
+                aprime = A_prime_plus[i_a, i_z] if i_tau == 0 else A_prime_minus[i_a, i_z]
+                ia_low, w1, w2 = get_interpolation_weights(aprime, a_grid)
+
+                # Persistence: stay at (z, tau) with prob psi
+                if w1 > 1e-9:
+                    s_next = ia_low * nz * 2 + i_z * 2 + i_tau
+                    rows.append(s_next); cols.append(s); data.append(psi * w1)
+                if w2 > 1e-9 and ia_low + 1 < na:
+                    s_next = (ia_low + 1) * nz * 2 + i_z * 2 + i_tau
+                    rows.append(s_next); cols.append(s); data.append(psi * w2)
+
+                # Redraw: with prob 1-psi, draw new (z', tau')
+                for i_zp in range(nz):
+                    p_zp = prob_z[i_zp]
+                    if p_zp < 1e-12:
+                        continue
+                    p_tau_plus_new = prob_tau_plus[i_zp]
+
+                    # Transition to tau_plus
+                    if p_tau_plus_new > 1e-12:
+                        if w1 > 1e-9:
+                            s_next = ia_low * nz * 2 + i_zp * 2 + 0
+                            rows.append(s_next); cols.append(s); data.append((1-psi) * p_zp * p_tau_plus_new * w1)
+                        if w2 > 1e-9 and ia_low + 1 < na:
+                            s_next = (ia_low + 1) * nz * 2 + i_zp * 2 + 0
+                            rows.append(s_next); cols.append(s); data.append((1-psi) * p_zp * p_tau_plus_new * w2)
+
+                    # Transition to tau_minus
+                    p_tau_minus_new = 1 - p_tau_plus_new
+                    if p_tau_minus_new > 1e-12:
+                        if w1 > 1e-9:
+                            s_next = ia_low * nz * 2 + i_zp * 2 + 1
+                            rows.append(s_next); cols.append(s); data.append((1-psi) * p_zp * p_tau_minus_new * w1)
+                        if w2 > 1e-9 and ia_low + 1 < na:
+                            s_next = (ia_low + 1) * nz * 2 + i_zp * 2 + 1
+                            rows.append(s_next); cols.append(s); data.append((1-psi) * p_zp * p_tau_minus_new * w2)
+
+    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
+
+    if mu_init is not None:
+        mu = mu_init
+    else:
+        mu = np.ones(n_states) / n_states
+
+    for _ in range(500):
+        mu_new = Q @ mu
+        mu_new /= mu_new.sum()
+        if np.max(np.abs(mu_new - mu)) < 1e-10:
+            break
+        mu = mu_new
+
+    mu_full = mu.reshape((na, nz, 2))
+    return mu_full[:, :, 0], mu_full[:, :, 1]  # mu_plus, mu_minus
 
 # =============================================================================
-# Nested Price Clearing Utils (Appendix B.2)
+# Aggregate Computation
 # =============================================================================
 
-@njit(cache=False)
-def labor_excess_mu_nodist(w, r, mu, a_h, z_h, params):
-    delta, alpha, nu, lam = params[0], params[1], params[2], params[3]
-    na, nz = len(a_h), len(z_h)
-    L_d = 0.0; En_share = 0.0
-    for ia in range(na):
-        for iz in range(nz):
-            wgt = mu[ia, iz]
-            p, _, ld, _ = solve_entrepreneur_single(a_h[ia], z_h[iz], w, r, lam, delta, alpha, nu)
-            if p > w:
-                L_d += ld * wgt
-                En_share += wgt
-    return L_d - (1.0 - En_share)
-
-@njit(cache=False)
-def capital_excess_mu_nodist(r, w, mu, a_h, z_h, params):
-    delta, alpha, nu, lam = params[0], params[1], params[2], params[3]
-    na, nz = len(a_h), len(z_h)
-    K_d, A_s = 0.0, 0.0
-    for ia in range(na):
-        for iz in range(nz):
-            wgt = mu[ia, iz]
-            A_s += a_h[ia] * wgt
-            p, ks, _, _ = solve_entrepreneur_single(a_h[ia], z_h[iz], w, r, lam, delta, alpha, nu)
-            if p > w: K_d += ks * wgt
-    return K_d - A_s
-
-@njit(cache=False)
-def labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, tp, tm):
-    delta, alpha, nu, lam = params[0], params[1], params[2], params[3]
-    na, nz = len(a_h), len(z_h)
-    L_d, En_share = 0.0, 0.0
-    # Plus state
-    for ia in range(na):
-        for iz in range(nz):
-            wgt = mu_p[ia, iz]
-            pp, _, ld, _ = solve_entrepreneur_with_tau(a_h[ia], z_h[iz], tp, w, r, lam, delta, alpha, nu)
-            if pp > w: 
-                L_d += ld*wgt; En_share += wgt
-    # Minus state
-    for ia in range(na):
-        for iz in range(nz):
-            wgt = mu_m[ia, iz]
-            pm, _, ld, _ = solve_entrepreneur_with_tau(a_h[ia], z_h[iz], tm, w, r, lam, delta, alpha, nu)
-            if pm > w: 
-                L_d += ld*wgt; En_share += wgt
-    return L_d - (1.0 - En_share)
-
-@njit(cache=False)
-def capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, tp, tm):
-    delta, alpha, nu, lam = params[0], params[1], params[2], params[3]
-    na, nz = len(a_h), len(z_h)
-    K_d, A_s = 0.0, 0.0
-    for ia in range(na):
-        for iz in range(nz):
-            A_s += a_h[ia] * (mu_p[ia, iz] + mu_m[ia, iz])
-            pp, ks_p, _, _ = solve_entrepreneur_with_tau(a_h[ia], z_h[iz], tp, w, r, lam, delta, alpha, nu)
-            if pp > w: K_d += ks_p * mu_p[ia, iz]
-            pm, ks_m, _, _ = solve_entrepreneur_with_tau(a_h[ia], z_h[iz], tm, w, r, lam, delta, alpha, nu)
-            if pm > w: K_d += ks_m * mu_m[ia, iz]
-    return K_d - A_s
-
-# Bisections
-def solve_w_clear_mu(r, mu, a_h, z_h, params, dists=False, mu_m=None):
-    w_min, w_max = 0.01, 2.5
-    for _ in range(30):
-        w = (w_min + w_max) / 2
-        if dists:
-            ed = labor_excess_with_dist(w, r, mu, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-        else:
-            ed = labor_excess_mu_nodist(w, r, mu, a_h, z_h, params)
-        if ed > 0: w_min = w
-        else: w_max = w
-        if abs(ed) < 1e-6: break
-    return w
-
-# =============================================================================
-# Steady State Solver (Nested w in r)
-# =============================================================================
-
-@njit(cache=False)
+@njit(cache=True)
 def get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, nu):
+    """Aggregates WITHOUT distortions (from v6)"""
     na, nz = len(a_h), len(z_h)
     K, L, Y, En, A, Ext = 0., 0., 0., 0., 0., 0.
     for ia in range(na):
@@ -502,373 +509,558 @@ def get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, nu):
                 Ext += max(0.0, ks - a)*wgt
     return K, L, Y, En, A, Ext
 
-@njit(cache=False)
-def get_aggregates_with_dist(mu_p, mu_m, a_h, z_h, w, r, lam, d, al, nu, tp, tm):
+@njit(cache=True)
+def get_aggregates_with_dist(mu_plus, mu_minus, a_h, z_h, w, r, lam, delta, alpha, nu, tau_plus, tau_minus):
+    """Aggregates WITH distortions"""
     na, nz = len(a_h), len(z_h)
     K, L, Y, En, A, Ext = 0., 0., 0., 0., 0., 0.
+
     for ia in range(na):
         a = a_h[ia]
         for iz in range(nz):
             z = z_h[iz]
-            # tp
-            wp = mu_p[ia, iz]; A += a * wp
-            p_p, k_p, l_p, o_p = solve_entrepreneur_with_tau(a, z, tp, w, r, lam, d, al, nu)
+
+            # tau_plus state
+            wgt_p = mu_plus[ia, iz]
+            A += a * wgt_p
+            p_p, ks_p, ld_p, out_p = solve_entrepreneur_with_tau(a, z, tau_plus, w, r, lam, delta, alpha, nu)
             if p_p > w:
-                K += k_p*wp; L += l_p*wp; Y += o_p*wp; En += wp; Ext += max(0., k_p - a)*wp
-            # tm
-            wm = mu_m[ia, iz]; A += a * wm
-            p_m, k_m, l_m, o_m = solve_entrepreneur_with_tau(a, z, tm, w, r, lam, d, al, nu)
+                K += ks_p * wgt_p; L += ld_p * wgt_p; Y += out_p * wgt_p; En += wgt_p
+                Ext += max(0.0, ks_p - a) * wgt_p
+
+            # tau_minus state
+            wgt_m = mu_minus[ia, iz]
+            A += a * wgt_m
+            p_m, ks_m, ld_m, out_m = solve_entrepreneur_with_tau(a, z, tau_minus, w, r, lam, delta, alpha, nu)
             if p_m > w:
-                K += k_m*wm; L += l_m*wm; Y += o_m*wm; En += wm; Ext += max(0., k_m - a)*wm
+                K += ks_m * wgt_m; L += ld_m * wgt_m; Y += out_m * wgt_m; En += wgt_m
+                Ext += max(0.0, ks_m - a) * wgt_m
+
     return K, L, Y, En, A, Ext
 
-def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=None, max_iter=200, diag_out=None, key="post"):
-    na, nz = len(a_grid), len(z_grid); n_states = na * nz
-    A_prime_mat = bivariate_eval_matrix(a_grid, z_grid, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
-    rows, cols, data = [], [], []
-    for ia in range(na):
-        for iz in range(nz):
-            s = ia * nz + iz; aprime = A_prime_mat[ia, iz]
-            ia_low, w1, w2 = get_interpolation_weights(aprime, a_grid)
-            for izp in range(nz):
-                pz = (psi + (1-psi)*prob_z[izp]) if izp == iz else (1-psi)*prob_z[izp]
-                if w1 > 1e-9: rows.append(ia_low * nz + izp); cols.append(s); data.append(pz * w1)
-                if w2 > 1e-9: rows.append((ia_low+1) * nz + izp); cols.append(s); data.append(pz * w2)
-    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
-    if mu_init is None: mu = np.ones(n_states) / n_states
-    else: mu = mu_init.ravel()
-    for i in range(max_iter):
-        m_new = Q @ mu; m_new /= m_new.sum()
-        diff = np.max(np.abs(m_new - mu))
-        if diag_out is not None: diag_out['dist_errs'][key].append(diff)
-        if i % 10 == 0: print(f"    [Dist analytical {key}] it={i}, diff={diff:.2e}")
-        if diff < 1e-10: break
-        mu = m_new
-    return mu.reshape((na, nz))
+# =============================================================================
+# GE Solver (from v6, extended for distortions)
+# =============================================================================
 
-def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_init=None, max_iter=200, diag_out=None, key="pre"):
-    na, nz = len(a_grid), len(z_grid); n_states = na * nz * 2
-    Ap, Am = bivariate_eval_matrix(a_grid, z_grid, cp, A_MIN, A_MAX, Z_MIN, Z_MAX), bivariate_eval_matrix(a_grid, z_grid, cm, A_MIN, A_MAX, Z_MIN, Z_MAX)
-    rows, cols, data = [], [], []
-    for ia in range(na):
-        for iz in range(nz):
-            for it in range(2): # 0=p, 1=m
-                s = ia*nz*2 + iz*2 + it; apr = Ap[ia, iz] if it == 0 else Am[ia, iz]
-                ial, w1, w2 = get_interpolation_weights(apr, a_grid)
-                if w1 > 1e-9: rows.append(ial*nz*2 + iz*2 + it); cols.append(s); data.append(psi*w1)
-                if w2 > 1e-9: rows.append((ial+1)*nz*2 + iz*2 + it); cols.append(s); data.append(psi*w2)
-                for izp in range(nz):
-                    ptp = prob_tp[izp]
-                    if w1 > 1e-9:
-                        rows.append(ial*nz*2+izp*2+0); cols.append(s); data.append((1-psi)*pr_z[izp]*ptp*w1)
-                        rows.append(ial*nz*2+izp*2+1); cols.append(s); data.append((1-psi)*pr_z[izp]*(1-ptp)*w1)
-                    if w2 > 1e-9:
-                        rows.append((ial+1)*nz*2+izp*2+0); cols.append(s); data.append((1-psi)*pr_z[izp]*ptp*w2)
-                        rows.append((ial+1)*nz*2+izp*2+1); cols.append(s); data.append((1-psi)*pr_z[izp]*(1-ptp)*w2)
-    Q = sparse.csr_matrix((data, (rows, cols)), shape=(n_states, n_states))
-    if mu_init is None: mu = np.ones(n_states) / n_states
-    else: mu = mu_init.ravel()
-    for i in range(max_iter):
-        m_new = Q @ mu; m_new /= m_new.sum()
-        diff = np.max(np.abs(m_new - mu))
-        if diag_out is not None: diag_out['dist_errs'][key].append(diff)
-        if i % 10 == 0: print(f"    [Dist withDist {key}] it={i}, diff={diff:.2e}")
-        if diff < 1e-10: break
-        mu = m_new
-    mu_f = mu.reshape((na, nz, 2))
-    return mu_f[:,:,0], mu_f[:,:,1]
+def find_equilibrium(params, distortions=False, w_init=0.30, r_init=-0.02,
+                     coeffs_init=None, coeffs_plus_init=None, coeffs_minus_init=None,
+                     tau_plus=TAU_PLUS, tau_minus=TAU_MINUS, q_dist=Q_DIST):
+    """
+    Find general equilibrium.
 
-def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post"):
+    Args:
+        params: (delta, alpha, nu, lam, beta, sigma, psi)
+        distortions: whether to include tau wedges
+    """
     delta, alpha, nu, lam, beta, sigma, psi = params
-    na_h = 600; nz_h = 40
+    w, r = w_init, r_init
+
+    # Build grids
+    na_h, nz_h = 600, 40
     a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
-    M_v = np.concatenate([np.linspace(0.0, 0.998, 38), [0.999, 0.9995]])
+    M_v = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
     z_h = (1 - M_v)**(-1/ETA)
-    pr_z = np.zeros(nz_h); pr_z[0] = M_v[0]; pr_z[1:] = M_v[1:] - M_v[:-1]; pr_z /= pr_z.sum()
-    prob_tp = 1 - np.exp(-Q_DIST * z_h)
+    pr_z = np.zeros(nz_h)
+    pr_z[0] = M_v[0]
+    pr_z[1:] = M_v[1:] - M_v[:-1]
+    pr_z /= pr_z.sum()
+
+    # Probability of tau_plus for each z
+    prob_tau_plus = 1 - np.exp(-q_dist * z_h)
+
+    # Initialize coefficients
+    if distortions:
+        coeffs_plus = coeffs_plus_init
+        coeffs_minus = coeffs_minus_init
+    else:
+        coeffs = coeffs_init
+
+    dist = None
+    w_step, r_step = 0.1, 0.03
+    exc_L_p, exc_K_p = 0.0, 0.0
+    wh, rh = [], []
+
+    for it in range(120):
+        if distortions:
+            coeffs_plus, coeffs_minus = solve_policy_spectral_with_dist(
+                params, w, r, tau_plus, tau_minus, q_dist,
+                coeffs_plus, coeffs_minus
+            )
+            mu_plus, mu_minus = compute_stationary_with_dist(
+                coeffs_plus, coeffs_minus, a_h, z_h, pr_z, prob_tau_plus, psi
+            )
+            K_agg, L_d, Y_agg, share_en, A_agg, extfin = get_aggregates_with_dist(
+                mu_plus, mu_minus, a_h, z_h, w, r, lam, delta, alpha, nu, tau_plus, tau_minus
+            )
+        else:
+            coeffs = solve_policy_spectral(params, w, r, coeffs)
+            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi,
+                                                  mu_init=dist.ravel() if dist is not None else None)
+            K_agg, L_d, Y_agg, share_en, A_agg, extfin = get_aggregates_analytical(
+                dist, a_h, z_h, w, r, lam, delta, alpha, nu
+            )
+
+        if K_agg < 1e-4:
+            w *= 0.98
+            print(f"  [{it+1}] !!! COLLAPSE - w reset")
+            continue
+
+        ws = 1.0 - share_en
+        eL, eK = (L_d - ws)/max(ws, 0.05), (K_agg - A_agg)/max(A_agg, 1.0)
+        print(f"  [{it+1}] w={w:.4f}, r={r:.4f} | K={K_agg:.2f}, A={A_agg:.2f} | Ld={L_d:.2f}, Ls={ws:.2f}")
+
+        if abs(eL) + abs(eK) < 2e-3:
+            break
+
+        if it > 0:
+            if eL * exc_L_p < 0: w_step *= 0.5
+            else: w_step = min(w_step * 1.05, 0.2)
+            if eK * exc_K_p < 0: r_step *= 0.5
+            else: r_step = min(r_step * 1.05, 0.05)
+
+        dw, dr = max(-0.05, min(0.05, w_step*eL)), max(-0.01, min(0.01, r_step*eK))
+        w_r, r_r = w * (1.0 + dw), r + dr
+        wh.append(w); rh.append(r)
+
+        if len(wh) > 3:
+            w, r = 0.5*w_r + 0.5*np.median(wh[-4:]), 0.5*r_r + 0.5*np.median(rh[-4:])
+        else:
+            w, r = w_r, r_r
+
+        exc_L_p, exc_K_p = eL, eK
+
+    # Compute TFP
+    span = 1 - nu
+    L_s = 1.0 - share_en
+    TFP = Y_agg / max(((K_agg ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
+
+    result = {
+        'w': w, 'r': r, 'Y': Y_agg, 'K': K_agg, 'L': L_d, 'A': A_agg,
+        'extfin': extfin, 'share_entre': share_en, 'TFP': TFP,
+        'ExtFin_Y': extfin / max(Y_agg, 1e-8),
+        'a_grid': a_h, 'z_grid': z_h, 'prob_z': pr_z,
+    }
+
+    if distortions:
+        result['coeffs_plus'] = coeffs_plus
+        result['coeffs_minus'] = coeffs_minus
+        result['mu_plus'] = mu_plus
+        result['mu_minus'] = mu_minus
+        result['prob_tau_plus'] = prob_tau_plus
+    else:
+        result['coeffs'] = coeffs
+        result['dist'] = dist
+
+    return result
+
+# =============================================================================
+# Transition Path - Backward Policy Iteration
+# =============================================================================
+
+@njit(cache=True, parallel=True)
+def solve_policy_transition_update(coeffs_curr, coeffs_next, nodes_a, nodes_z, T_az_inv,
+                                    beta, sigma, psi, w_t, r_t, w_tp1, r_tp1,
+                                    lam, delta, alpha, nu,
+                                    a_min, a_max, z_min, z_max,
+                                    quad_z, quad_w):
+    """
+    One step of backward policy iteration for transition (no distortions).
+    Given policy at t+1 and prices at t and t+1, solve for policy at t.
+    """
+    nz_c = N_CHEBY_Z
+    nt = len(nodes_a) * nz_c
+    target_vals = np.zeros(nt)
+
+    for i_n in prange(nt):
+        ia, iz = i_n // nz_c, i_n % nz_c
+        a, z = nodes_a[ia], nodes_z[iz]
+
+        # Income at t
+        p, _, _, _ = solve_entrepreneur_single(a, z, w_t, r_t, lam, delta, alpha, nu)
+        inc = max(p, w_t) + (1 + r_t) * a
+
+        # Current guess for a'
+        aprime = bivariate_eval(a, z, coeffs_curr, a_min, a_max, z_min, z_max)
+        aprime = max(a_min, min(aprime, inc - 1e-6))
+
+        # Expected marginal utility at t+1 using next period's policy
+        # Persistence branch
+        p_p, _, _, _ = solve_entrepreneur_single(aprime, z, w_tp1, r_tp1, lam, delta, alpha, nu)
+        inc_p = max(p_p, w_tp1) + (1 + r_tp1) * aprime
+        app = bivariate_eval(aprime, z, coeffs_next, a_min, a_max, z_min, z_max)
+        mu_pers = max(inc_p - app, 1e-9) ** (-sigma)
+
+        # Redraw branch
+        e_mu_redraw = 0.0
+        for k in range(len(quad_z)):
+            pk, _, _, _ = solve_entrepreneur_single(aprime, quad_z[k], w_tp1, r_tp1, lam, delta, alpha, nu)
+            ick = max(pk, w_tp1) + (1 + r_tp1) * aprime
+            akk = bivariate_eval(aprime, quad_z[k], coeffs_next, a_min, a_max, z_min, z_max)
+            e_mu_redraw += quad_w[k] * max(ick - akk, 1e-9) ** (-sigma)
+
+        expected_mu = psi * mu_pers + (1 - psi) * e_mu_redraw
+        c_target = (beta * (1 + r_t) * expected_mu) ** (-1.0/sigma)
+        target_vals[i_n] = max(a_min, min(inc - c_target, a_max))
+
+    return T_az_inv @ target_vals
+
+def solve_policy_transition_at_t(coeffs_next, w_t, r_t, w_tp1, r_tp1, params, coeffs_init=None):
+    """Solve for policy at time t given policy at t+1"""
+    delta, alpha, nu, lam, beta, sigma, psi = params
     nodes_a, nodes_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
     T_inv = np.linalg.inv(T_full)
-    z_quad = z_h.copy(); z_w = pr_z.copy()
-    r_min, r_max = -0.15, 0.08
-    coeffs_curr = None; dist_curr = None
-    
-    for out_iter in range(12):
-        r = (r_min + r_max) / 2
-        print(f"\n[Outer SS {label}] Iter {out_iter}: r={r:.6f}, bounds=[{r_min:.4f}, {r_max:.4f}]")
-        w_low, w_high = 0.01, 3.5
-        for inn_iter in range(25):
-            w = (w_low + w_high) / 2
-            if not distortions:
-                coeffs = solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
-                dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
-                ed_L = labor_excess_mu_nodist(w, r, dist, a_h, z_h, params)
-                coeffs_curr, dist_curr = coeffs, dist
-            else:
-                cp, cm = solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, prob_tp, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
-                mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
-                ed_L = labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-                coeffs_curr, dist_curr = (cp, cm), np.concatenate([mu_p.ravel(), mu_m.ravel()])
-            
-            if diag_out is not None:
-                diag_out['edL_history'][f"{label}_r{out_iter}"].append(ed_L)
-            
-            if inn_iter % 3 == 0 or abs(ed_L) < 1e-4:
-                print(f"    [Wage Bisection] it={inn_iter}, w={w:.4f}, edL={ed_L:.3e}, bracket=[{w_low:.3f}, {w_high:.3f}]")
 
-            if ed_L > 0: w_low = w
-            else: w_high = w
-            if abs(ed_L) < 1e-5: break
-        
-        if not distortions:
-            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=250)
-            ed_K = capital_excess_mu_nodist(r, w, dist, a_h, z_h, params)
-            ed_L = labor_excess_mu_nodist(w, r, dist, a_h, z_h, params)
-        else:
-            mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=250)
-            ed_K = capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-            ed_L = labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-            
-        if diag_out is not None:
-            diag_out['edK_history'][label].append(ed_K)
-        
-        # Plot final policy for this r iteration
-        if not distortions: plot_current_policy_status(coeffs, f"{label} r{out_iter} FINAL", filename="policy_post_final.png")
-        else: plot_current_policy_status(cp, f"{label} r{out_iter} plus FINAL", filename="policy_pre_final.png")
-            
-        print(f"  [RESULT r={r:.4f}] final_w={w:.4f}, edL={ed_L:.4e}, edK={ed_K:.4e}")
-        
-        # CRITICAL: Only allow outer convergence if inner market actually cleared
-        if abs(ed_K) < 2e-3 and abs(ed_L) < 5e-4: 
-            print("  [GE SUCCESS] Both markets cleared!")
-            break
-        
-        if ed_K > 0: r_min = r
-        else: r_max = r
+    M_vals = np.concatenate([np.linspace(0.633, 0.998, 38), [0.999, 0.9995]])
+    z_quad = (1 - M_vals)**(-1/ETA)
+    z_w = np.zeros(40)
+    z_w[0] = M_vals[0]
+    z_w[1:] = M_vals[1:] - M_vals[:-1]
+    z_w /= z_w.sum()
 
-        if out_iter == 11:
-            print("  [GE WARNING] Outer loop finished without full clearing.")
-    if not distortions:
-        K, L, Y, En, A, Ext = get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, nu)
-    else:
-        K, L, Y, En, A, Ext = get_aggregates_with_dist(mu_p, mu_m, a_h, z_h, w, r, lam, delta, alpha, nu, TAU_PLUS, TAU_MINUS)
-    res = {'w': w, 'r': r, 'Y': Y, 'K': K, 'A': A, 'TFP': Y/max(((K**alpha)*((1-En)**(1-alpha)))**(1-nu), 1e-8),
-           'a_grid': a_h, 'z_grid': z_h, 'prob_z': pr_z, 'share_entre': En, 'ExtFin_Y': Ext/max(Y, 1e-8)}
-    if distortions:
-        res['coeffs_plus'], res['coeffs_minus'], res['mu_plus'], res['mu_minus'] = cp, cm, mu_p, mu_m
-    else:
-        res['coeffs'] = coeffs
-    return res
+    coeffs = coeffs_init if coeffs_init is not None else coeffs_next.copy()
 
-def solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, quad_z, quad_w, coeffs_init, diag_out=None, key="post", show_plot=False):
-    delta, alpha, nu, lam, beta, sigma, psi = params
-    # Initialize with a small 'seed' of savings if no warm start to avoid zero-asset trap
-    if coeffs_init is not None:
-        coeffs = coeffs_init
-    else:
-        # A simple linear rule: save 10% of max assets as a starting guess
-        seed_vals = 0.1 * nodes_a.repeat(N_CHEBY_Z) + 0.05 * A_MAX
-        coeffs = T_inv @ seed_vals
-
-    for i in range(MAX_ITER_POLICY):
-        c_new = solve_policy_bivariate_update(coeffs, nodes_a, nodes_z, T_inv, beta, sigma, psi, w, r, lam, delta, alpha, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w)
+    for it in range(100):
+        c_new = solve_policy_transition_update(
+            coeffs, coeffs_next, nodes_a, nodes_z, T_inv,
+            beta, sigma, psi, w_t, r_t, w_tp1, r_tp1,
+            lam, delta, alpha, nu,
+            A_MIN, A_MAX, Z_MIN, Z_MAX, z_quad, z_w
+        )
         diff = np.max(np.abs(c_new - coeffs))
-        if diag_out is not None: 
-            diag_out['policy_errs'][key].append(diff)
-        if i % 5 == 0: 
-            print(f"      [Policy spectral] it={i}, diff={diff:.2e}")
-        if diff < 1e-7: break
-        coeffs = 0.5 * coeffs + 0.5 * c_new
-    if show_plot: plot_current_policy_status(coeffs, f"{key} final")
+        coeffs = 0.7 * coeffs + 0.3 * c_new
+        if diff < 1e-7:
+            break
+
     return coeffs
 
-def solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, quad_z, quad_w, prob_tp, coeffs_in, diag_out=None, key="pre", show_plot=False):
-    delta, alpha, nu, lam, beta, sigma, psi = params
-    if coeffs_in is not None:
-        cp, cm = coeffs_in
-    else:
-        cp = np.zeros(N_CHEBY_A * N_CHEBY_Z); cm = np.zeros(N_CHEBY_A * N_CHEBY_Z)
-    for i in range(MAX_ITER_POLICY):
-        cnp = solve_policy_bivariate_update_with_dist(cp, cm, nodes_a, nodes_z, T_inv, beta, sigma, psi, w, r, lam, delta, alpha, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, prob_tp, TAU_PLUS, TAU_MINUS, True)
-        cnm = solve_policy_bivariate_update_with_dist(cp, cm, nodes_a, nodes_z, T_inv, beta, sigma, psi, w, r, lam, delta, alpha, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w, prob_tp, TAU_PLUS, TAU_MINUS, False)
-        diff = max(np.max(np.abs(cnp - cp)), np.max(np.abs(cnm - cm)))
-        if diag_out is not None: 
-            diag_out['policy_errs'][key].append(diff)
-        if i % 5 == 0: 
-            print(f"      [Policy spectral pre] it={i}, diff={diff:.2e}")
-        if diff < 1e-7: break
-        cp, cm = 0.5 * cp + 0.5 * cnp, 0.5 * cm + 0.5 * cnm
-    if show_plot: plot_current_policy_status(cp, f"{key} plus final")
-    return cp, cm
-
 # =============================================================================
-# Transition Path (Algorithm B.2 logic)
+# Transition Path - Forward Distribution Update
 # =============================================================================
 
-def solve_transition_v2(pre_eq, post_eq, params, T=250, diag_out=None):
+def update_distribution_forward(dist_t, coeffs_t, a_grid, z_grid, prob_z, psi):
+    """Update distribution from t to t+1"""
+    na, nz = len(a_grid), len(z_grid)
+
+    A_prime_mat = bivariate_eval_matrix(a_grid, z_grid, coeffs_t, A_MIN, A_MAX, Z_MIN, Z_MAX)
+
+    dist_next = np.zeros((na, nz))
+
+    for i_a in range(na):
+        for i_z in range(nz):
+            mass = dist_t[i_a, i_z]
+            if mass < 1e-14:
+                continue
+
+            aprime = A_prime_mat[i_a, i_z]
+            ia_low, w1, w2 = get_interpolation_weights(aprime, a_grid)
+
+            for i_zp in range(nz):
+                p_z = (psi + (1-psi)*prob_z[i_zp]) if i_zp == i_z else (1-psi)*prob_z[i_zp]
+                if p_z > 1e-12:
+                    if w1 > 1e-9:
+                        dist_next[ia_low, i_zp] += mass * p_z * w1
+                    if w2 > 1e-9 and ia_low + 1 < na:
+                        dist_next[ia_low + 1, i_zp] += mass * p_z * w2
+
+    return dist_next / dist_next.sum()
+
+# =============================================================================
+# Time Path Iteration (TPI)
+# =============================================================================
+
+def solve_transition(pre_eq, post_eq, params, T=250, kappa=0.05,
+                     eta_w=0.3, eta_r=0.02, theta=0.5, tol=5e-3, max_iter=100):
+    """
+    Solve transition path from pre-reform to post-reform steady state.
+    """
     delta, alpha, nu, lam, beta, sigma, psi = params
-    a_h = post_eq['a_grid']; z_h = post_eq['z_grid']; pr_z = post_eq['prob_z']
-    
-    # 1. Initial Guess for r and w paths
-    t_idx = np.arange(T)
-    r_path = np.linspace(pre_eq['r'], post_eq['r'], T)
-    w_path = np.linspace(pre_eq['w'], post_eq['w'], T)
-    
+
+    # Grids
+    a_grid = post_eq['a_grid']
+    z_grid = post_eq['z_grid']
+    prob_z = post_eq['prob_z']
+
+    # Prices
+    w_pre, r_pre = pre_eq['w'], pre_eq['r']
+    w_post, r_post = post_eq['w'], post_eq['r']
+
+    # Initial distribution: marginal over tau from pre-reform
     mu_0 = pre_eq['mu_plus'] + pre_eq['mu_minus']
-    
-    for outer_tpi in range(15):
-        print(f"\n[Outer TPI] iteration {outer_tpi+1}")
-        
-        # Inner loop: Wages w_t for fixed r_t
-        for inner_tpi in range(10):
-            # A. Backward Induction Policies
-            pols = [None] * T; pols[T-1] = post_eq['coeffs']
-            for t in range(T-2, -1, -1):
-                pols[t] = solve_policy_transition_at_t_simple(pols[t+1], w_path[t], r_path[t], w_path[t+1], r_path[t+1], params)
-            
-            # B. Forward Distribution Update and Labor Market Clearing
-            mu_t = mu_0.copy()
-            w_new = np.zeros(T); max_edl = 0.0
-            for t in range(T):
-                edl = labor_excess_mu_nodist(w_path[t], r_path[t], mu_t, a_h, z_h, params)
-                max_edl = max(max_edl, abs(edl))
-                w_new[t] = w_path[t] * (1 + 0.2 * edl)
-                if t < T - 1:
-                    Ap = bivariate_eval_matrix(a_h, z_h, pols[t], A_MIN, A_MAX, Z_MIN, Z_MAX)
-                    mu_t = update_dist_matrix_nodist(Ap, mu_t, len(a_h), len(z_h), pr_z, PSI, a_h)
-            
-            w_path = 0.5 * w_path + 0.5 * w_new
-            if max_edl < 1e-3: break
-            
-        # C. Capital Market Clearing for r_t
-        mu_t = mu_0.copy(); r_new = np.zeros(T); max_edk = 0.0
+    mu_0 /= mu_0.sum()
+
+    # Terminal policy
+    coeffs_post = post_eq['coeffs']
+
+    # Initialize price paths
+    t_arr = np.arange(T)
+    w_path = w_post + (w_pre - w_post) * np.exp(-kappa * t_arr)
+    r_path = r_post + (r_pre - r_post) * np.exp(-kappa * t_arr)
+
+    print(f"\n{'='*70}")
+    print("TRANSITION PATH ITERATION")
+    print(f"{'='*70}")
+    print(f"T = {T}, Initial: w_pre={w_pre:.4f}, r_pre={r_pre:.4f}")
+    print(f"Target: w_post={w_post:.4f}, r_post={r_post:.4f}")
+    print(f"{'='*70}\n")
+
+    # Storage
+    Y_path = np.zeros(T)
+    K_path = np.zeros(T)
+    L_path = np.zeros(T)
+    A_path = np.zeros(T)
+    TFP_path = np.zeros(T)
+    ExtFin_path = np.zeros(T)
+    Entre_path = np.zeros(T)
+    ED_L_path = np.zeros(T)
+    ED_K_path = np.zeros(T)
+
+    for tpi_iter in range(max_iter):
+        # =================================================================
+        # BACKWARD: Solve policies
+        # =================================================================
+        policies = [None] * T
+
+        # Terminal condition
+        for t in range(T-1, -1, -1):
+            if t == T-1:
+                policies[t] = coeffs_post.copy()
+            else:
+                w_tp1 = w_path[t+1] if t+1 < T else w_post
+                r_tp1 = r_path[t+1] if t+1 < T else r_post
+                coeffs_next = policies[t+1] if t+1 < T else coeffs_post
+
+                policies[t] = solve_policy_transition_at_t(
+                    coeffs_next, w_path[t], r_path[t], w_tp1, r_tp1,
+                    params, coeffs_init=policies[t+1] if t+1 < T else coeffs_post
+                )
+
+        # =================================================================
+        # FORWARD: Update distributions and compute aggregates
+        # =================================================================
+        dist_t = mu_0.copy()
+
         for t in range(T):
-            edk = capital_excess_mu_nodist(r_path[t], w_path[t], mu_t, a_h, z_h, params)
-            max_edk = max(max_edk, abs(edk))
-            r_new[t] = r_path[t] + 0.01 * edk
+            w_t, r_t = w_path[t], r_path[t]
+
+            # Aggregates at t
+            K, L, Y, En, A, Ext = get_aggregates_analytical(
+                dist_t, a_grid, z_grid, w_t, r_t, lam, delta, alpha, nu
+            )
+
+            K_path[t] = K
+            L_path[t] = L
+            Y_path[t] = Y
+            A_path[t] = A
+            ExtFin_path[t] = Ext
+            Entre_path[t] = En
+
+            # TFP
+            span = 1 - nu
+            L_s = 1.0 - En
+            TFP_path[t] = Y / max(((K ** alpha) * (L_s ** (1-alpha))) ** span, 1e-8)
+
+            # Market clearing residuals
+            ED_L_path[t] = (L - L_s) / max(L_s, 0.05)
+            ED_K_path[t] = (K - A) / max(A, 1.0)
+
+            # Update distribution
             if t < T - 1:
-                Ap = bivariate_eval_matrix(a_h, z_h, pols[t], A_MIN, A_MAX, Z_MIN, Z_MAX)
-                mu_t = update_dist_matrix_nodist(Ap, mu_t, len(a_h), len(z_h), pr_z, PSI, a_h)
-        
-        r_path = 0.5 * r_path + 0.5 * r_new
-        if diag_out is not None:
-            diag_out['tpi_errs_L'].append(max_edl)
-            diag_out['tpi_errs_K'].append(max_edk)
-        print(f"  Max ED_L={max_edl:.4f}, Max ED_K={max_edk:.4f}")
-        if max_edk < 3e-3: break
+                dist_t = update_distribution_forward(dist_t, policies[t], a_grid, z_grid, prob_z, psi)
 
-    # Final Pass for storage
-    res_path = {'t': t_idx, 'w': w_path, 'r': r_path, 'Y': np.zeros(T), 'K': np.zeros(T), 'L': np.zeros(T), 'A': np.zeros(T)}
-    mu_t = mu_0.copy()
-    for t in range(T):
-        K, L, Y, En, A, Ext = get_aggregates_analytical(mu_t, a_h, z_h, w_path[t], r_path[t], lam, delta, alpha, nu)
-        res_path['Y'][t], res_path['K'][t], res_path['A'][t] = Y, K, A
-        if t < T - 1:
-            Ap = bivariate_eval_matrix(a_h, z_h, pols[t], A_MIN, A_MAX, Z_MIN, Z_MAX)
-            mu_t = update_dist_matrix_nodist(Ap, mu_t, len(a_h), len(z_h), pr_z, PSI, a_h)
-    return res_path
+        # =================================================================
+        # CHECK CONVERGENCE
+        # =================================================================
+        max_ED = max(np.max(np.abs(ED_L_path)), np.max(np.abs(ED_K_path)))
 
-@njit(cache=False, parallel=True)
-def solve_policy_transition_update_v2(c_curr, c_next, n_a, n_z, T_inv, beta, sig, psi, wt, rt, wt1, rt1, lam, d, a, nu, amin, amax, zmin, zmax, qz, qw):
-    nz_c = N_CHEBY_Z; nt = len(n_a) * nz_c; target = np.zeros(nt)
-    for i in prange(nt):
-        ia, iz = i // nz_c, i % nz_c; cur_a, cur_z = n_a[ia], n_z[iz]
-        p, _, _, _ = solve_entrepreneur_single(cur_a, cur_z, wt, rt, lam, d, a, nu)
-        inc = max(p, wt) + (1 + rt) * cur_a
-        ap = bivariate_eval(cur_a, cur_z, c_curr, amin, amax, zmin, zmax)
-        ap = max(amin, min(ap, inc - 1e-6))
-        # Mu at t+1
-        p1, _, _, _ = solve_entrepreneur_single(ap, cur_z, wt1, rt1, lam, d, a, nu)
-        inc1 = max(p1, wt1) + (1 + rt1) * ap
-        app = bivariate_eval(ap, cur_z, c_next, amin, amax, zmin, zmax)
-        mu_p = max(inc1 - app, 1e-9)**(-sig)
-        e_mu = 0.0
-        for k in range(len(qz)):
-            pk, _, _, _ = solve_entrepreneur_single(ap, qz[k], wt1, rt1, lam, d, a, nu)
-            ick = max(pk, wt1) + (1+rt1)*ap
-            akk = bivariate_eval(ap, qz[k], c_next, amin, amax, zmin, zmax)
-            e_mu += qw[k] * max(ick - akk, 1e-9)**(-sig)
-        exp_mu = psi * mu_p + (1-psi)*e_mu
-        c_tar = (beta*(1+rt)*exp_mu)**(-1.0/sig)
-        target[i] = max(amin, min(inc - c_tar, amax))
-    return T_inv @ target
+        if tpi_iter % 5 == 0 or tpi_iter < 3:
+            print(f"[TPI iter {tpi_iter+1:3d}] max|ED_L|={np.max(np.abs(ED_L_path)):.5f}, "
+                  f"max|ED_K|={np.max(np.abs(ED_K_path)):.5f}")
 
-def solve_policy_transition_at_t_simple(c_next, wt, rt, wt1, rt1, params):
-    d, a, nu, lam, beta, sig, psi = params
-    n_a, n_z, T_inv = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)[0:3]; T_inv = np.linalg.inv(T_inv)
-    qz = n_z; qw = np.ones(len(n_z))/len(n_z) # Simple integration for transition step
-    c = c_next.copy()
-    for _ in range(20):
-        c_new = solve_policy_transition_update_v2(c, c_next, n_a, n_z, T_inv, beta, sig, psi, wt, rt, wt1, rt1, lam, d, a, nu, A_MIN, A_MAX, Z_MIN, Z_MAX, qz, qw)
-        if np.max(np.abs(c_new - c)) < 1e-6: break
-        c = 0.5 * c + 0.5 * c_new
-    return c
+        if max_ED < tol:
+            print(f"\n[CONVERGED] after {tpi_iter+1} iterations")
+            break
+
+        # =================================================================
+        # UPDATE PRICES
+        # =================================================================
+        w_path_new = w_path * (1 + eta_w * ED_L_path)
+        r_path_new = r_path + eta_r * ED_K_path
+
+        # Smooth
+        window = 5
+        for t in range(window, T - window):
+            w_path_new[t] = 0.7 * w_path_new[t] + 0.3 * np.mean(w_path_new[t-window:t+window])
+            r_path_new[t] = 0.7 * r_path_new[t] + 0.3 * np.mean(r_path_new[t-window:t+window])
+
+        # Enforce terminal
+        decay_len = min(20, T//10)
+        w_path_new[-decay_len:] = w_post + (w_path_new[-decay_len] - w_post) * np.exp(-0.3 * np.arange(decay_len))
+        r_path_new[-decay_len:] = r_post + (r_path_new[-decay_len] - r_post) * np.exp(-0.3 * np.arange(decay_len))
+
+        # Damped update
+        w_path = (1 - theta) * w_path + theta * w_path_new
+        r_path = (1 - theta) * r_path + theta * r_path_new
+
+    return {
+        't': np.arange(T),
+        'w': w_path, 'r': r_path,
+        'Y': Y_path, 'K': K_path, 'L': L_path, 'A': A_path,
+        'TFP': TFP_path, 'ExtFin': ExtFin_path,
+        'ExtFin_Y': ExtFin_path / np.maximum(Y_path, 1e-8),
+        'Entre_share': Entre_path,
+        'ED_L': ED_L_path, 'ED_K': ED_K_path,
+    }
+
+# =============================================================================
+# Output and Plotting
+# =============================================================================
+
+def save_results(pre_eq, post_eq, trans, output_dir='outputs'):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save equilibria
+    for name, eq in [('stationary_pre', pre_eq), ('stationary_post', post_eq)]:
+        summary = {k: float(v) if isinstance(v, (int, float, np.floating)) else None
+                   for k, v in eq.items() if not isinstance(v, np.ndarray)}
+        with open(os.path.join(output_dir, f'{name}.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
+
+    # Save transition CSV
+    import csv
+    with open(os.path.join(output_dir, 'transition.csv'), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['t', 'w', 'r', 'Y', 'K', 'L', 'A', 'TFP', 'ext_fin', 'ext_fin_Y', 'entrepreneur_share'])
+        for i in range(len(trans['t'])):
+            writer.writerow([trans['t'][i], trans['w'][i], trans['r'][i], trans['Y'][i],
+                           trans['K'][i], trans['L'][i], trans['A'][i], trans['TFP'][i],
+                           trans['ExtFin'][i], trans['ExtFin_Y'][i], trans['Entre_share'][i]])
+
+    print(f"\nResults saved to {output_dir}/")
+
+def plot_transition(pre_eq, post_eq, trans, output_dir='outputs'):
+    os.makedirs(output_dir, exist_ok=True)
+
+    t = trans['t']
+    Y_post, TFP_post = post_eq['Y'], post_eq['TFP']
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+    # Output
+    axes[0,0].plot(t, trans['Y']/Y_post, 'b-', lw=2)
+    axes[0,0].axhline(1.0, color='r', ls='--', alpha=0.7)
+    axes[0,0].axhline(pre_eq['Y']/Y_post, color='g', ls=':', alpha=0.7)
+    axes[0,0].set_xlabel('Period'); axes[0,0].set_ylabel('Y / Y_post')
+    axes[0,0].set_title('Output'); axes[0,0].grid(True, alpha=0.3)
+
+    # TFP
+    axes[0,1].plot(t, trans['TFP']/TFP_post, 'b-', lw=2)
+    axes[0,1].axhline(1.0, color='r', ls='--', alpha=0.7)
+    axes[0,1].axhline(pre_eq['TFP']/TFP_post, color='g', ls=':', alpha=0.7)
+    axes[0,1].set_xlabel('Period'); axes[0,1].set_ylabel('TFP / TFP_post')
+    axes[0,1].set_title('TFP'); axes[0,1].grid(True, alpha=0.3)
+
+    # Interest Rate
+    axes[0,2].plot(t, trans['r'], 'b-', lw=2)
+    axes[0,2].axhline(post_eq['r'], color='r', ls='--', alpha=0.7)
+    axes[0,2].axhline(pre_eq['r'], color='g', ls=':', alpha=0.7)
+    axes[0,2].set_xlabel('Period'); axes[0,2].set_ylabel('r')
+    axes[0,2].set_title('Interest Rate'); axes[0,2].grid(True, alpha=0.3)
+
+    # Wage
+    axes[1,0].plot(t, trans['w'], 'b-', lw=2)
+    axes[1,0].axhline(post_eq['w'], color='r', ls='--', alpha=0.7)
+    axes[1,0].axhline(pre_eq['w'], color='g', ls=':', alpha=0.7)
+    axes[1,0].set_xlabel('Period'); axes[1,0].set_ylabel('w')
+    axes[1,0].set_title('Wage'); axes[1,0].grid(True, alpha=0.3)
+
+    # External Finance
+    axes[1,1].plot(t, trans['ExtFin_Y'], 'b-', lw=2)
+    axes[1,1].axhline(post_eq['ExtFin_Y'], color='r', ls='--', alpha=0.7)
+    axes[1,1].axhline(pre_eq['ExtFin_Y'], color='g', ls=':', alpha=0.7)
+    axes[1,1].set_xlabel('Period'); axes[1,1].set_ylabel('ExtFin/Y')
+    axes[1,1].set_title('External Finance'); axes[1,1].grid(True, alpha=0.3)
+
+    # Entrepreneur Share
+    axes[1,2].plot(t, trans['Entre_share'], 'b-', lw=2)
+    axes[1,2].axhline(post_eq['share_entre'], color='r', ls='--', alpha=0.7)
+    axes[1,2].axhline(pre_eq['share_entre'], color='g', ls=':', alpha=0.7)
+    axes[1,2].set_xlabel('Period'); axes[1,2].set_ylabel('Share')
+    axes[1,2].set_title('Entrepreneur Share'); axes[1,2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'transition_dynamics.png'), dpi=150)
+    plt.close()
+    print(f"Plots saved to {output_dir}/transition_dynamics.png")
+
+def print_summary(pre_eq, post_eq, trans):
+    print("\n" + "="*70)
+    print("RESULTS SUMMARY")
+    print("="*70)
+    print(f"\n{'Variable':<20} {'Pre-Reform':>15} {'Post-Reform':>15} {'Change %':>12}")
+    print("-"*62)
+
+    for name, key in [('Output (Y)', 'Y'), ('TFP', 'TFP'), ('Capital (K)', 'K'),
+                      ('Assets (A)', 'A'), ('Wage (w)', 'w'), ('Interest Rate (r)', 'r'),
+                      ('Ext.Fin/GDP', 'ExtFin_Y'), ('Entre Share', 'share_entre')]:
+        pre_v, post_v = pre_eq[key], post_eq[key]
+        chg = (post_v - pre_v) / abs(pre_v) * 100 if pre_v != 0 else 0
+        print(f"{name:<20} {pre_v:>15.4f} {post_v:>15.4f} {chg:>11.2f}%")
+
+    print("\nSanity Checks:")
+    print(f"  TFP change: {'[PASS] increases' if post_eq['TFP'] > pre_eq['TFP'] else '[WARN] decreases'}")
+    print(f"  Y change: {'[PASS] increases' if post_eq['Y'] > pre_eq['Y'] else '[WARN] decreases'}")
+    print("="*70)
 
 # =============================================================================
 # Main
 # =============================================================================
 
 def main():
-    print("\n" + "="*50)
-    print("BUERA & SHIN V2: SPECTRAL NESTED SOLVER")
-    print("="*50)
-    
-    # Grid Plot
-    plot_grid_comparison()
-    print("Diagnostic: 'plots/asset_grid_comparison.png' saved.")
+    parser = argparse.ArgumentParser(description='Buera & Shin Transition Dynamics')
+    parser.add_argument('--T', type=int, default=250, help='Transition horizon')
+    parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory')
+    args = parser.parse_args()
 
-    # Transition diagnostics
-    from collections import defaultdict
-    diagnostics = {
-        'policy_errs': defaultdict(list),
-        'dist_errs': defaultdict(list),
-        'edL_history': defaultdict(list),
-        'edK_history': defaultdict(list),
-        'tpi_errs_L': [], 'tpi_errs_K': []
-    }
+    print("="*70)
+    print("BUERA & SHIN (2010) TRANSITION DYNAMICS")
+    print("With Idiosyncratic Output Distortions")
+    print("="*70)
+    print(f"\nParameters: lambda={LAMBDA}, tau_plus={TAU_PLUS}, tau_minus={TAU_MINUS}, q={Q_DIST}")
+    print(f"Transition horizon T={args.T}")
+    print("="*70)
+
+    t_start = time.time()
 
     params = (DELTA, ALPHA, NU, LAMBDA, BETA, SIGMA, PSI)
-    
-    # SS
-    print("\n" + "="*70)
-    print("[STEP 1] Post-reform SS (Nested)")
-    print("="*70)
-    post = find_equilibrium_nested(params, distortions=False, diag_out=diagnostics, label="post")
-    
-    print("\n" + "="*70)
-    print("[STEP 2] Pre-reform SS (Nested)")
-    print("="*70)
-    pre = find_equilibrium_nested(params, distortions=True, diag_out=diagnostics, label="pre")
-    
-    # Transition
-    print("\n" + "="*70)
-    print("[STEP 3] Transition Path (Alg B.2)")
-    print("="*70)
-    trans = solve_transition_v2(pre, post, params, T=25, diag_out=diagnostics)
-    
-    # Summary
-    print("\n" + "="*70)
-    print("RESULTS SUMMARY")
-    print("="*70)
-    print(f"{'Variable':<20} {'Pre-Reform':>15} {'Post-Reform':>15} {'Change %':>12}")
-    print("-" * 62)
-    for name, key in [('Output (Y)', 'Y'), ('TFP', 'TFP'), ('Capital (K)', 'K'),
-                      ('Assets (A)', 'A'), ('Wage (w)', 'w'), ('Interest Rate (r)', 'r'),
-                      ('Ext.Fin/Y', 'ExtFin_Y'), ('Entre Share', 'share_entre')]:
-        v0, v1 = pre[key], post[key]
-        chg = (v1 - v0) / abs(v0) * 100 if v0 != 0 else 0
-        print(f"{name:<20} {v0:>15.4f} {v1:>15.4f} {chg:>11.2f}%")
-    print("="*70)
 
-    # Plotting Output
-    plt.figure()
-    plt.plot(trans['t'], trans['Y'], label='Output Y')
-    plt.title("Transition Path - Output")
-    plt.savefig("v2_transition.png"); plt.close()
-    
-    # Final Policies and Diagnostics
-    plot_policy_comparison(pre, post)
-    plot_diagnostics(diagnostics)
-    print("\nCompleted. v2_transition.png, plots/policy_comparison_v2.png, and plots/convergence_diagnostics.png saved.")
+    # Step 1: Post-reform equilibrium (NO distortions) - solve this first as it converges faster
+    print("\n" + "="*70)
+    print("STEP 1: Post-reform Stationary Equilibrium (NO distortions)")
+    print("="*70)
+    post_eq = find_equilibrium(params, distortions=False, w_init=0.80, r_init=-0.04)
+    print(f"\nPost-reform: w={post_eq['w']:.4f}, r={post_eq['r']:.4f}, Y={post_eq['Y']:.4f}, TFP={post_eq['TFP']:.4f}")
+
+    # Step 2: Pre-reform equilibrium (WITH distortions) - use post-reform values as initial guess
+    print("\n" + "="*70)
+    print("STEP 2: Pre-reform Stationary Equilibrium (WITH distortions)")
+    print("="*70)
+    pre_eq = find_equilibrium(params, distortions=True, w_init=post_eq['w'], r_init=post_eq['r'])
+    print(f"\nPre-reform: w={pre_eq['w']:.4f}, r={pre_eq['r']:.4f}, Y={pre_eq['Y']:.4f}, TFP={pre_eq['TFP']:.4f}")
+
+    # Step 3: Transition
+    print("\n" + "="*70)
+    print("STEP 3: Transition Dynamics (TPI)")
+    print("="*70)
+    trans = solve_transition(pre_eq, post_eq, params, T=args.T)
+
+    print(f"\nTotal time: {time.time() - t_start:.1f}s")
+
+    # Save and plot
+    save_results(pre_eq, post_eq, trans, args.output_dir)
+    plot_transition(pre_eq, post_eq, trans, args.output_dir)
+    print_summary(pre_eq, post_eq, trans)
+
+    return pre_eq, post_eq, trans
 
 if __name__ == '__main__':
     main()
