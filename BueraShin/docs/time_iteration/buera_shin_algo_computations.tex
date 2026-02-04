@@ -28,7 +28,7 @@ Entrepreneurial ability $z$ follows a reset process: with probability $\psi$, $z
 
 \section{Production and Optimal Firm Decisions}
 An entrepreneur with ability $z$ and assets $a$ operates the technology:
-\begin{equation}
+\begin{equation} 
     y = z (k^\alpha l^{1-\alpha})^{1-\nu}
 \end{equation}
 where $\nu$ represents the span-of-control parameter (entrepreneur's share). The entrepreneur faces a collateral constraint $k \leq \lambda a$.
@@ -49,9 +49,9 @@ Solving for $l$ yields the conditional labor demand:
 Substituting $l^*(k, z)$ back into the profit function gives a profit function $\pi(k)$ that is concave in $k$. The unconstrained capital demand $k^{unc}$ satisfies $\pi'(k^{unc}) = r+\delta$. If $k^{unc} > \lambda a$, the entrepreneur is borrowing-constrained and sets $k^* = \lambda a$.
 
 \section{The Recursive Household Problem}
-The agent's state is $(a, z)$. The total income is $i(a, z) = \max\{\pi(a, z, k^*), w\} + (1+r)a$. The Bellman equation is:
+The agent's state is $(a, z)$. The total income is $y(a, z) = \max\{\pi(a, z, k^*), w\} + (1+r)a$. The Bellman equation is:
 \begin{equation}
-    V(a, z) = \max_{a'} \left\{ \frac{(i(a, z) - a')^{1-\sigma}-1}{1-\sigma} + \beta \text{Cont}(a', z) \right\}
+    V(a, z) = \max_{a'} \left\{ \frac{(y(a, z) - a')^{1-\sigma}-1}{1-\sigma} + \beta \text{Cont}(a', z) \right\}
 \end{equation}
 where the continuation value is:
 \begin{equation}
@@ -63,13 +63,24 @@ The first-order condition for the optimal savings $a'$ (assuming an interior sol
 \begin{equation}
     c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ]
 \end{equation}
-Defining marginal utility as $MU(a, z) = (i(a, z) - a'(a, z))^{-\sigma}$, the equation becomes:
+Defining marginal utility as $MU(a, z) = (y(a, z) - a'(a, z))^{-\sigma}$, the equation becomes:
 \begin{equation}
     MU(a, z) = \beta (1+r) \left[ \psi MU(a', z) + (1-\psi) \int MU(a', z') \pi(z') dz' \right]
 \end{equation}
 
 \section{Spectral Time Iteration Logic}
 The policy function $a'(a, z)$ is approximated by a bivariate Chebyshev polynomial $\hat{a}(a, z; \bm{C})$.
+
+\subsection{Detailed First-Order Condition in Spectral Form}
+Let $\bm{\Phi}(a, z)$ be the vector of bivariate Chebyshev basis functions, such that the savings policy is $\hat{a}(a, z; \bm{C}) = \bm{\Phi}(a, z)^\top \bm{C}$. The household's optimal choice $a'$ satisfies the following first-order condition:
+\begin{equation}
+    F(a', a, z; \bm{C}) \equiv [y(a, z) - a']^{-\sigma} - \beta(1+r) \left[ \psi \text{MU}' + (1-\psi) \mathbb{E}_{z'} \text{MU}' \right] = 0
+\end{equation}
+where the next-period marginal utility $\text{MU}'$ is evaluated using the \textbf{known} coefficients $\bm{C}$ from the previous iteration:
+\begin{equation}
+    \text{MU}'(a', z'; \bm{C}) = \left[ y(a', z') - \bm{\Phi}(a', z')^\top \bm{C} \right]^{-\sigma}
+\end{equation}
+In this formulation, $a'$ is the target savings level for the current period (the variable we solve for), while $\bm{C}$ defines the behavior of the agent from $t+1$ onwards. The spectral method is powerful because $\bm{\Phi}(a', z')$ and its derivatives are defined for any $a' \in [a_{min}, a_{max}]$, allowing us to solve $F(a')=0$ using continuous root-finding methods (e.g., Brent's method) or by direct inversion.
 
 \subsection{Grid and Mapping}
 Chebyshev polynomials are defined on $x \in [-1, 1]$. We map the state space:
@@ -88,7 +99,7 @@ Given a current set of coefficients $\bm{C}^{(n)}$:
         \mathbb{E}[MU] = (1-\psi) \sum_k w_k MU(a', z_k; \bm{C}^{(n)}) + \psi MU(a', z_j; \bm{C}^{(n)})
     \end{equation}
     \item \textbf{Invert Euler Equation}: Find the target consumption $c^* = [\beta (1+r) \mathbb{E}[MU]]^{-1/\sigma}$.
-    \item \textbf{Compute New Policy}: The target savings is $a^*_{target} = i(a_i, z_j) - c^*$. We apply the constraint $a' = \max\{a_{min}, a^*_{target}\}$.
+    \item \textbf{Compute New Policy}: The target savings is $a^*_{target} = y(a_i, z_j) - c^*$. We apply the constraint $a' = \max\{a_{min}, a^*_{target}\}$.
     \item \textbf{Update Coefficients}: Solve the linear system $\bm{T} \bm{C}^{(n+1)} = \bm{a}^*$, where $\bm{T}$ is the matrix of Chebyshev polynomials evaluated at the nodes.
 \end{enumerate}
 
