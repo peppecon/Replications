@@ -966,9 +966,9 @@ def capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, tp, tm):
 # Relaxation Parameters (very conservative for spectral stability)
 # =============================================================================
 ETA_W = 0.15  # Wage relaxation parameter
-ETA_R = 0.10  # Interest rate relaxation parameter (very conservative)
+ETA_R = 0.15  # Interest rate relaxation parameter
 W_MIN, W_MAX = 0.1, 5.0  # Tighter bounds
-R_MIN = -0.05  # Tighter lower bound (avoid extreme negative rates)
+R_MIN = -0.15  # Allow more negative rates for pre-reform equilibrium
 R_MAX = 0.06   # Tighter upper bound (realistic interest rates)
 
 # Bisection to find market-clearing price (then relax separately)
@@ -1155,7 +1155,7 @@ def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_
     mu_f = mu.reshape((na, nz, 2))
     return mu_f[:,:,0], mu_f[:,:,1]
 
-def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post", use_newton=True):
+def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post", use_newton=True, w_init=None, r_init=None):
     """
     Find stationary equilibrium using nested price clearing with RELAXATION.
 
@@ -1169,6 +1169,8 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
         diag_out: dictionary for convergence diagnostics
         label: label for printing and diagnostics
         use_newton: if True, use Newton solver; else use Picard iteration
+        w_init: initial wage guess (optional)
+        r_init: initial interest rate guess (optional)
     """
     delta, alpha, nu, lam, beta, sigma, psi = params
 
@@ -1185,9 +1187,15 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
     T_inv = np.linalg.inv(T_full)
     z_quad = z_h.copy(); z_w = pr_z.copy()
 
-    # Initial price guesses
-    w = 0.8 if not distortions else 0.55
-    r = -0.04 if not distortions else -0.05
+    # Initial price guesses (use provided or defaults)
+    if w_init is not None:
+        w = w_init
+    else:
+        w = 0.8 if not distortions else 0.55
+    if r_init is not None:
+        r = r_init
+    else:
+        r = -0.04 if not distortions else -0.06
 
     # State caches for warm starting
     coeffs_curr = None
