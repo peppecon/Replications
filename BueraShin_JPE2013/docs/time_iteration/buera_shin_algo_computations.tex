@@ -51,11 +51,11 @@ Substituting $l^*(k, z)$ back into the profit function gives a profit function $
 \section{The Recursive Household Problem}
 The agent's state is $(a, z)$. The total income is $y(a, z) = \max\{\pi(a, z, k^*), w\} + (1+r)a$. The Bellman equation is:
 \begin{equation}
-    V(a, z) = \max_{a'} \left\{ \frac{(y(a, z) - a')^{1-\sigma}-1}{1-\sigma} + \beta \text{Cont}(a', z) \right\}
+    V(a, z) = \max_{a'} \left\{ \frac{(y(a, z) - a')^{1-\sigma}-1}{1-\sigma} + \beta \mathbb{E}[V(a', z') | z] \right\}
 \end{equation}
-where the continuation value is:
+where the expected continuation value is:
 \begin{equation}
-    \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \int V(a', z') \pi(z') dz'
+    \mathbb{E}[V(a', z') | z] = \psi V(a', z) + (1-\psi) \int V(a', z') \pi(z') dz'
 \end{equation}
 
 \subsection{Derivation of the Euler Equation}
@@ -91,7 +91,7 @@ while ability nodes $z_j$ are mapped linearly.
 \subsection{Pointwise Euler Inversion}
 To solve for the optimal policy, we utilize a recursive operator that linearizes the Global Euler Equation. At each collocation node $(a_i, z_j)$, we define the \textbf{Target Function} $F(a')$ as the difference between current marginal utility and expected future marginal utility:
 \begin{equation}
-    F(a'; a_i, z_j, \bm{\gamma}^{(n)}) \equiv \underbrace{(y_i - a')^{-\sigma}}_{\text{Current MU}} - \beta(1+r) \underbrace{\mathcal{E}(a'; \bm{\gamma}^{(n)})}_{\text{Continuation MU}}
+    F(a'; a_i, z_j, \bm{\gamma}^{(n)}) \equiv \underbrace{(y_i - a')^{-\sigma}}_{\text{Current MU}} - \beta(1+r) \underbrace{\mathcal{E}(a'; \bm{\gamma}^{(n)})}_{\text{Expected Future MU}}
 \end{equation}
 where $\mathcal{E}$ is the expectation over future states $(\hat{a}_i, z')$ given the \textbf{known} continuation policy $\bm{\gamma}^{(n)}$:
 \begin{equation}

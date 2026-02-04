@@ -76,13 +76,13 @@ To compute the continuation value $\mathbb{E}[V(a', z') | z]$, the algorithm spl
 \end{equation}
 The specific continuation value for state $(a, z)$ becomes a weighted average of the current ability's value and the reset value:
 \begin{equation}
-    \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \bar{V}(a')
+    \mathbb{E}[V(a', z') | z] = \psi V(a', z) + (1-\psi) \bar{V}(a')
 \end{equation}
 
 \subsection{Howard Policy Improvement}
 The Bellman operator $T(V)$ is computationally expensive due to the maximization step. Howard's improvement reduces the number of maximizations by iterating on a fixed policy $\sigma(a, z)$.
 \begin{enumerate}
-    \item \textbf{Policy Step}: Solve for $\sigma(a, z) = \arg\max_{a'} \{ u(c) + \beta \text{Cont}(a', z) \}$.
+    \item \textbf{Policy Step}: Solve for $\sigma(a, z) = \arg\max_{a'} \{ u(c) + \beta \mathbb{E}[V(a', z') | z] \}$.
     \item \textbf{Value Step}: For a fixed $\sigma$, iterate $N_{how}$ times:
     \begin{equation}
         V^{(m+1)}(a, z) = u(i(a, z) - \sigma(a, z)) + \beta [\psi V^{(m)}(\sigma(a, z), z) + (1-\psi) \bar{V}^{(m)}(\sigma(a, z))]
@@ -92,11 +92,33 @@ This significantly speeds up convergence as the Value Step is a linear operation
 
 \subsection{\color{blue} Possible Improvements: Continuous Choice via Interpolation}
 {\color{blue}
-A significant enhancement to the discrete grid search is to allow for a continuous asset choice $a' \in [a_{min}, i]$. This is implemented by replacing the discrete maximization with a continuous optimizer and interpolating the continuation value:
+A significant enhancement to the discrete grid search is to allow for a continuous asset choice $a' \in [a_{min}, i]$. Restricted discrete grids $\{a_0, \dots, a_{N_a-1}\}$ introduce "step" artifacts and high-frequency noise in aggregate excess demand functions. By employing interpolation, we solve for $a^*$ as a continuous variable:
 \begin{equation}
-    a^*(a, z) = \arg\max_{a' \in [a_{min}, i]} \left\{ u(i - a') + \beta \mathcal{I}(\text{Cont}, a', z) \right\}
+    a^*(a, z) = \arg \max_{a' \in [a_{min}, i]} \{ u(i - a') + \beta \mathbb{E}[V(a', z') | z] \}
 \end{equation}
-where $\mathcal{I}$ is an interpolating function (e.g., linear or cubic spline). Mathematically, this smooths the aggregate supply and demand functions $K_d(r)$ and $L_d(w)$, eliminating the "step" artifacts inherent in discrete grids and improving the convergence of the bisection algorithms in the general equilibrium solver.
+
+There are three primary computational pathways to implementing this continuous choice:
+
+\paragraph{1. Direct Root-finding (High Accuracy)}
+We solve the First-Order Condition $(i - a^*)^{-\sigma} = \beta \frac{\partial \mathbb{E}[V(a', z') | z]}{\partial a'}$ using a 1D root-finder (e.g., Newton-Raphson or Brent's method). This involves:
+\begin{itemize}
+    \item Evaluating the return function $u(c)$ exactly.
+    \item Interpolating the continuation value $V(a')$ using advanced schemes like Akima cubic splines or Hermite polynomials to ensure smooth derivatives.
+\end{itemize}
+This provides the highest precision but is computationally demanding as it requires multiple function evaluations per state-space point.
+
+\paragraph{2. Linear Interpolation \& Algebraic Inversion (High Speed)}
+Assuming linear interpolation of the value function between grid points $a_k$ and $a_{k+1}$, the derivative $\partial V / \partial a$ becomes constant within each interval. This allows for a quasi-algebraic solution:
+\begin{equation}
+    a^*_{interp} = i(a, z) - \left[ \beta \frac{V_{k+1} - V_k}{a_{k+1} - a_k} \right]^{-1/\sigma}
+\end{equation}
+This is significantly faster than root-finding but less accurate, as it approximates the return function's slope as piece-wise constant.
+
+\paragraph{3. Fine-Grid Subdivision (GPU Friendly)}
+We subdivide each grid interval $[a_k, a_{k+1}]$ into $n$ sub-intervals. We then evaluate the return function and interpolated continuation value at these $n \cdot N_a$ points. While conceptually still a grid search, the fine mesh approximates continuity. This approach is highly parallelizable and "GPU friendly," as it replaces serial root-finding branching with massive vector evaluations.
+
+\paragraph{Impact on General Equilibrium}
+Regardless of the method, the primary benefit is the smoothing of aggregate capital supply $K_s(r)$ and labor demand $L_d(w)$ functions. Continuous choice eliminates the "step" oscillations in GE price loops, allowing for higher precision and faster convergence of Algorithm B.2.
 }
 
 \subsection{Coupled VFI for Distortions}
