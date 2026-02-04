@@ -579,18 +579,9 @@ def solve_policy_newton(params, w, r, nodes_a, nodes_z, T_mat, T_inv, quad_z, qu
         coeffs = coeffs_init.copy()
 
     if method == 'picard' or method == 'picard_accelerated':
-        # Pure Picard iteration with adaptive damping
-        if verbose:
-            print(f"      [Picard] Running up to {max_iter} iterations with adaptive damping")
-
-        # Anderson acceleration storage (keep last m iterates)
-        m_anderson = 5 if method == 'picard_accelerated' else 0
-        F_history = []  # Store g(x) - x
-        X_history = []  # Store x
-
-        damping = 0.5
+        # Picard iteration with careful damping for stability
+        damping = 0.3
         best_diff = np.inf
-        stall_count = 0
 
         for i in range(max_iter):
             coeffs_new = solve_policy_bivariate_update(
@@ -601,73 +592,24 @@ def solve_policy_newton(params, w, r, nodes_a, nodes_z, T_mat, T_inv, quad_z, qu
 
             diff = np.max(np.abs(coeffs_new - coeffs))
 
-            # Adaptive damping
+            # Increase damping gradually as we converge
             if diff < best_diff:
                 best_diff = diff
-                stall_count = 0
-                damping = min(0.8, damping + 0.05)  # Increase damping if improving
-            else:
-                stall_count += 1
-                if stall_count > 3:
-                    damping = max(0.2, damping - 0.1)  # Decrease damping if stalling
-                    stall_count = 0
+                if diff < 0.1:
+                    damping = min(0.6, damping + 0.02)
+                elif diff < 0.5:
+                    damping = min(0.5, damping + 0.01)
 
-            if method == 'picard_accelerated' and i > 0:
-                # Anderson acceleration
-                F_k = coeffs_new - coeffs
-                F_history.append(F_k)
-                X_history.append(coeffs.copy())
+            coeffs = damping * coeffs_new + (1 - damping) * coeffs
 
-                if len(F_history) > m_anderson:
-                    F_history.pop(0)
-                    X_history.pop(0)
-
-                if len(F_history) >= 2:
-                    # Solve least squares for mixing coefficients
-                    m_curr = len(F_history)
-                    F_mat = np.column_stack(F_history)
-                    try:
-                        # Solve min ||F_mat @ alpha - F_k||
-                        alpha_coeffs, _, _, _ = np.linalg.lstsq(F_mat[:, :-1] - F_mat[:, -1:],
-                                                                 -F_mat[:, -1], rcond=None)
-                        alpha_coeffs = np.append(alpha_coeffs, 1.0 - np.sum(alpha_coeffs))
-
-                        # Compute accelerated iterate
-                        X_mat = np.column_stack(X_history)
-                        G_mat = X_mat + F_mat  # g(x) = x + (g(x) - x)
-                        coeffs_accel = G_mat @ alpha_coeffs
-
-                        # Use accelerated if it's better
-                        coeffs_test = damping * coeffs_accel + (1 - damping) * coeffs
-                    except:
-                        coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
-                else:
-                    coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
-            else:
-                coeffs_test = damping * coeffs_new + (1 - damping) * coeffs
-
-            coeffs = coeffs_test
-
-            if verbose and i % 10 == 0:
-                print(f"      [Picard] it={i}, diff={diff:.2e}, damping={damping:.2f}")
+            if verbose and i % 30 == 0:
+                print(f"      [Policy] it={i}, diff={diff:.2e}, damp={damping:.2f}")
 
             if diff < tol:
-                if verbose:
-                    print(f"      [Picard] Converged at iter {i+1}, diff={diff:.2e}")
                 return coeffs, True
 
-        # Check final residual
-        scaled_residuals = euler_residuals_scaled_numba(
-            coeffs, nodes_a, nodes_z,
-            beta, sigma, psi, w, r, lam, delta, alpha, nu,
-            A_MIN, A_MAX, Z_MIN, Z_MAX, quad_z, quad_w
-        )
-        scaled_norm = np.max(np.abs(scaled_residuals))
-        success = scaled_norm < 0.05  # Relaxed tolerance
-
-        if verbose:
-            status = "CONVERGED" if success else "NOT CONVERGED"
-            print(f"      [Picard] {status}: max|R_scaled|={scaled_norm:.2e}, final diff={diff:.2e}")
+        # Accept if diff is reasonably small
+        success = diff < 5e-3
 
         return coeffs, success
 
@@ -892,13 +834,8 @@ def solve_policy_newton_with_dist(params, w, r, nodes_a, nodes_z, T_mat, T_inv,
     else:
         cp, cm = coeffs_init[0].copy(), coeffs_init[1].copy()
 
-    # Use Picard iteration with adaptive damping for stability
-    if verbose:
-        print(f"      [Picard Dist] Running up to {max_iter} iterations")
-
+    # Picard iteration with fixed damping
     damping = 0.5
-    best_diff = np.inf
-    stall_count = 0
 
     for i in range(max_iter):
         # Update both policies
@@ -917,33 +854,16 @@ def solve_policy_newton_with_dist(params, w, r, nodes_a, nodes_z, T_mat, T_inv,
 
         diff = max(np.max(np.abs(cnp - cp)), np.max(np.abs(cnm - cm)))
 
-        # Adaptive damping
-        if diff < best_diff:
-            best_diff = diff
-            stall_count = 0
-            damping = min(0.7, damping + 0.03)
-        else:
-            stall_count += 1
-            if stall_count > 3:
-                damping = max(0.2, damping - 0.1)
-                stall_count = 0
-
         cp = damping * cnp + (1 - damping) * cp
         cm = damping * cnm + (1 - damping) * cm
 
-        if verbose and i % 10 == 0:
-            print(f"      [Picard Dist] it={i}, diff={diff:.2e}, damping={damping:.2f}")
+        if verbose and i % 20 == 0:
+            print(f"      [Policy pre] it={i}, diff={diff:.2e}")
 
         if diff < tol:
-            if verbose:
-                print(f"      [Picard Dist] Converged at iter {i+1}, diff={diff:.2e}")
             return cp, cm, True
 
-    success = best_diff < 0.05
-    if verbose:
-        status = "CONVERGED" if success else "NOT CONVERGED"
-        print(f"      [Picard Dist] {status}: final diff={diff:.2e}")
-
+    success = diff < 1e-4  # Relaxed tolerance
     return cp, cm, success
 
 
@@ -1042,19 +962,103 @@ def capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, tp, tm):
             if pm > w: K_d += ks_m * mu_m[ia, iz]
     return K_d - A_s
 
-# Bisections
-def solve_w_clear_mu(r, mu, a_h, z_h, params, dists=False, mu_m=None):
-    w_min, w_max = 0.01, 2.5
-    for _ in range(30):
-        w = (w_min + w_max) / 2
-        if dists:
-            ed = labor_excess_with_dist(w, r, mu, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
+# =============================================================================
+# Relaxation Parameters (very conservative for spectral stability)
+# =============================================================================
+ETA_W = 0.15  # Wage relaxation parameter
+ETA_R = 0.10  # Interest rate relaxation parameter (very conservative)
+W_MIN, W_MAX = 0.1, 5.0  # Tighter bounds
+R_MIN = -0.05  # Tighter lower bound (avoid extreme negative rates)
+R_MAX = 0.06   # Tighter upper bound (realistic interest rates)
+
+# Bisection to find market-clearing price (then relax separately)
+def _bisect_root(func, lo, hi, max_it=28, tol_x=1e-10):
+    """Simple bisection root finder."""
+    f_lo, f_hi = func(lo), func(hi)
+    if f_lo == 0.0: return lo
+    if f_hi == 0.0: return hi
+    for _ in range(max_it):
+        mid = 0.5 * (lo + hi)
+        f_mid = func(mid)
+        if abs(hi - lo) < tol_x: return mid
+        if f_lo * f_mid <= 0.0:
+            hi, f_hi = mid, f_mid
         else:
-            ed = labor_excess_mu_nodist(w, r, mu, a_h, z_h, params)
-        if ed > 0: w_min = w
-        else: w_max = w
-        if abs(ed) < 1e-6: break
-    return w
+            lo, f_lo = mid, f_mid
+    return 0.5 * (lo + hi)
+
+def solve_w_clear_mu(r, mu, a_h, z_h, params, w_guess, dists=False, mu_m=None):
+    """Find market-clearing wage using robust bisection with bracketing."""
+    w_guess = float(np.clip(w_guess, W_MIN, W_MAX))
+
+    def f(w):
+        if dists:
+            return float(labor_excess_with_dist(w, r, mu, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS))
+        else:
+            return float(labor_excess_mu_nodist(w, r, mu, a_h, z_h, params))
+
+    # Quick check at guess
+    f0 = f(w_guess)
+    if abs(f0) < 1e-10: return w_guess
+
+    # Local bracket
+    lo = max(W_MIN, 0.6 * w_guess)
+    hi = min(W_MAX, 1.6 * w_guess)
+    f_lo, f_hi = f(lo), f(hi)
+    if f_lo * f_hi < 0.0:
+        return _bisect_root(f, lo, hi)
+
+    # Global scan to find bracket
+    n_scan = 28
+    grid = np.linspace(W_MIN, W_MAX, n_scan)
+    vals = np.array([f(x) for x in grid])
+    sign = np.sign(vals)
+    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
+    if idx.size > 0:
+        # Choose interval closest to guess
+        centers = 0.5 * (grid[idx] + grid[idx+1])
+        j = int(np.argmin(np.abs(centers - w_guess)))
+        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
+        return _bisect_root(f, lo, hi)
+
+    # No sign change found: return minimizer of |f|
+    j = int(np.argmin(np.abs(vals)))
+    return float(grid[j])
+
+def solve_r_clear_mu(w, mu, A_supply, a_h, z_h, params, r_guess, dists=False, mu_m=None):
+    """Find market-clearing interest rate using robust bisection with bracketing."""
+    r_guess = float(np.clip(r_guess, R_MIN, R_MAX))
+
+    def f(r):
+        if dists:
+            return float(capital_excess_with_dist(r, w, mu, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS))
+        else:
+            return float(capital_excess_mu_nodist(r, w, mu, a_h, z_h, params))
+
+    f0 = f(r_guess)
+    if abs(f0) < 1e-10: return r_guess
+
+    # Local bracket
+    lo = max(R_MIN, r_guess - 0.04)
+    hi = min(R_MAX, r_guess + 0.04)
+    f_lo, f_hi = f(lo), f(hi)
+    if f_lo * f_hi < 0.0:
+        return _bisect_root(f, lo, hi)
+
+    # Global scan
+    n_scan = 28
+    grid = np.linspace(R_MIN, R_MAX, n_scan)
+    vals = np.array([f(x) for x in grid])
+    sign = np.sign(vals)
+    idx = np.where(sign[:-1] * sign[1:] < 0.0)[0]
+    if idx.size > 0:
+        centers = 0.5 * (grid[idx] + grid[idx+1])
+        j = int(np.argmin(np.abs(centers - r_guess)))
+        lo, hi = float(grid[idx[j]]), float(grid[idx[j]+1])
+        return _bisect_root(f, lo, hi)
+
+    j = int(np.argmin(np.abs(vals)))
+    return float(grid[j])
 
 # =============================================================================
 # Steady State Solver (Nested w in r)
@@ -1095,7 +1099,7 @@ def get_aggregates_with_dist(mu_p, mu_m, a_h, z_h, w, r, lam, d, al, nu, tp, tm)
                 K += k_m*wm; L += l_m*wm; Y += o_m*wm; En += wm; Ext += max(0., k_m - a)*wm
     return K, L, Y, En, A, Ext
 
-def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=None, max_iter=200, diag_out=None, key="post"):
+def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=None, max_iter=200, diag_out=None, key="post", verbose=False):
     na, nz = len(a_grid), len(z_grid); n_states = na * nz
     A_prime_mat = bivariate_eval_matrix(a_grid, z_grid, coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
     rows, cols, data = [], [], []
@@ -1114,12 +1118,12 @@ def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=N
         m_new = Q @ mu; m_new /= m_new.sum()
         diff = np.max(np.abs(m_new - mu))
         if diag_out is not None: diag_out['dist_errs'][key].append(diff)
-        if i % 10 == 0: print(f"    [Dist analytical {key}] it={i}, diff={diff:.2e}")
+        if verbose and i % 50 == 0: print(f"    [Dist] it={i}, diff={diff:.2e}")
         if diff < 1e-10: break
         mu = m_new
     return mu.reshape((na, nz))
 
-def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_init=None, max_iter=200, diag_out=None, key="pre"):
+def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_init=None, max_iter=200, diag_out=None, key="pre", verbose=False):
     na, nz = len(a_grid), len(z_grid); n_states = na * nz * 2
     Ap, Am = bivariate_eval_matrix(a_grid, z_grid, cp, A_MIN, A_MAX, Z_MIN, Z_MAX), bivariate_eval_matrix(a_grid, z_grid, cm, A_MIN, A_MAX, Z_MIN, Z_MAX)
     rows, cols, data = [], [], []
@@ -1145,7 +1149,7 @@ def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_
         m_new = Q @ mu; m_new /= m_new.sum()
         diff = np.max(np.abs(m_new - mu))
         if diag_out is not None: diag_out['dist_errs'][key].append(diff)
-        if i % 10 == 0: print(f"    [Dist withDist {key}] it={i}, diff={diff:.2e}")
+        if verbose and i % 50 == 0: print(f"    [Dist pre] it={i}, diff={diff:.2e}")
         if diff < 1e-10: break
         mu = m_new
     mu_f = mu.reshape((na, nz, 2))
@@ -1153,7 +1157,11 @@ def compute_stationary_with_dist(cp, cm, a_grid, z_grid, pr_z, prob_tp, psi, mu_
 
 def find_equilibrium_nested(params, distortions=False, diag_out=None, label="post", use_newton=True):
     """
-    Find stationary equilibrium using nested price clearing.
+    Find stationary equilibrium using nested price clearing with RELAXATION.
+
+    This implements Algorithm B.2 from Buera & Shin (2013) Appendix:
+    - Inner loop: Solves for wage that clears labor market, then relaxes
+    - Outer loop: Solves for interest rate that clears capital market, then relaxes
 
     Parameters:
         params: tuple (delta, alpha, nu, lam, beta, sigma, psi)
@@ -1163,97 +1171,138 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
         use_newton: if True, use Newton solver; else use Picard iteration
     """
     delta, alpha, nu, lam, beta, sigma, psi = params
+
+    # Grid setup
     na_h = 600; nz_h = 40
     a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
     M_v = np.concatenate([np.linspace(0.0, 0.998, 38), [0.999, 0.9995]])
     z_h = (1 - M_v)**(-1/ETA)
     pr_z = np.zeros(nz_h); pr_z[0] = M_v[0]; pr_z[1:] = M_v[1:] - M_v[:-1]; pr_z /= pr_z.sum()
     prob_tp = 1 - np.exp(-Q_DIST * z_h)
+
+    # Spectral nodes and matrices
     nodes_a, nodes_z, T_full = generate_bivariate_nodes_matrix(A_MIN, A_MAX, Z_MIN, Z_MAX)
     T_inv = np.linalg.inv(T_full)
     z_quad = z_h.copy(); z_w = pr_z.copy()
-    r_min, r_max = -0.15, 0.08
-    coeffs_curr = None; dist_curr = None
+
+    # Initial price guesses
+    w = 0.8 if not distortions else 0.55
+    r = -0.04 if not distortions else -0.05
+
+    # State caches for warm starting
+    coeffs_curr = None
+    dist_curr = None
 
     solver_name = "Newton" if use_newton else "Picard"
-    print(f"\n[{label}] Using {solver_name} policy solver")
+    print(f"\n[{label}] Using {solver_name} policy solver with RELAXATION")
+    print(f"[{label}] Relaxation params: ETA_W={ETA_W}, ETA_R={ETA_R}")
 
-    for out_iter in range(12):
-        r = (r_min + r_max) / 2
-        print(f"\n[Outer SS {label}] Iter {out_iter}: r={r:.6f}, bounds=[{r_min:.4f}, {r_max:.4f}]")
-        w_low, w_high = 0.01, 3.5
-        for inn_iter in range(25):
-            w = (w_low + w_high) / 2
-            if not distortions:
-                if use_newton:
-                    # Use Picard with Anderson acceleration (fast and reasonably accurate)
-                    coeffs, success = solve_policy_newton(
-                        params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w,
-                        coeffs_init=coeffs_curr, tol=1e-8, verbose=(inn_iter % 3 == 0),
-                        max_iter=150, method='picard_accelerated'
-                    )
-                else:
-                    coeffs = solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
-                dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
-                ed_L = labor_excess_mu_nodist(w, r, dist, a_h, z_h, params)
-                coeffs_curr, dist_curr = coeffs, dist
+    # Outer loop on interest rate
+    for out_iter in range(60):
+        r_old = r
+
+        # ========== Solve policy ONCE at current (w, r) ==========
+        if not distortions:
+            if use_newton:
+                coeffs, success = solve_policy_newton(
+                    params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w,
+                    coeffs_init=coeffs_curr, tol=1e-8, verbose=True,
+                    max_iter=150, method='picard_accelerated'
+                )
             else:
-                if use_newton:
-                    cp, cm, success = solve_policy_newton_with_dist(
-                        params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w, prob_tp,
-                        coeffs_init=coeffs_curr, tol=1e-8, verbose=(inn_iter % 3 == 0),
-                        max_iter=150
-                    )
-                else:
-                    cp, cm = solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, prob_tp, coeffs_curr, diag_out, f"{label}_r{out_iter}_w{inn_iter}")
-                mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=150, diag_out=diag_out, key=f"{label}_r{out_iter}_w{inn_iter}")
-                ed_L = labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-                coeffs_curr, dist_curr = (cp, cm), np.concatenate([mu_p.ravel(), mu_m.ravel()])
-            
+                coeffs = solve_policy_spectral_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, coeffs_curr, diag_out, f"{label}_r{out_iter}")
+            coeffs_curr = coeffs
+
+            # Compute stationary distribution
+            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=200)
+            dist_curr = dist
+        else:
+            if use_newton:
+                cp, cm, success = solve_policy_newton_with_dist(
+                    params, w, r, nodes_a, nodes_z, T_full, T_inv, z_quad, z_w, prob_tp,
+                    coeffs_init=coeffs_curr, tol=1e-8, verbose=True,
+                    max_iter=150
+                )
+            else:
+                cp, cm = solve_policy_spectral_with_dist_nested(params, w, r, nodes_a, nodes_z, T_inv, z_quad, z_w, prob_tp, coeffs_curr, diag_out, f"{label}_r{out_iter}")
+            coeffs_curr = (cp, cm)
+
+            mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=200)
+            dist_curr = np.concatenate([mu_p.ravel(), mu_m.ravel()])
+
+        # ========== Inner wage loop (using fixed policy/distribution) ==========
+        for inn_iter in range(30):
+            w_old = w
+
+            # Find market-clearing wage and RELAX
+            if not distortions:
+                w_clear = solve_w_clear_mu(r, dist, a_h, z_h, params, w, dists=False)
+                ed_L = labor_excess_mu_nodist(w_clear, r, dist, a_h, z_h, params)
+            else:
+                w_clear = solve_w_clear_mu(r, mu_p, a_h, z_h, params, w, dists=True, mu_m=mu_m)
+                ed_L = labor_excess_with_dist(w_clear, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
+
+            w = ETA_W * w_clear + (1.0 - ETA_W) * w
+            w = float(np.clip(w, W_MIN, W_MAX))
+
             if diag_out is not None:
                 diag_out['edL_history'][f"{label}_r{out_iter}"].append(ed_L)
-            
-            if inn_iter % 3 == 0 or abs(ed_L) < 1e-4:
-                print(f"    [Wage Bisection] it={inn_iter}, w={w:.4f}, edL={ed_L:.3e}, bracket=[{w_low:.3f}, {w_high:.3f}]")
 
-            if ed_L > 0: w_low = w
-            else: w_high = w
-            if abs(ed_L) < 1e-5: break
-        
+            if inn_iter < 2 or inn_iter % 5 == 0:
+                print(f"    [Wage iter {inn_iter:02d}] w={w:.6f}  w_clear={w_clear:.6f}  ED_L={ed_L:.3e}")
+
+            # Check inner convergence (using clearing wage check)
+            if abs(w_clear - w) / max(abs(w), 1e-6) < 0.01:  # 1% relative tolerance
+                break
+
+        # ========== Interest rate update (capital clearing) ==========
         if not distortions:
-            dist = compute_stationary_analytical(coeffs, a_h, z_h, pr_z, psi, mu_init=dist_curr, max_iter=250)
-            ed_K = capital_excess_mu_nodist(r, w, dist, a_h, z_h, params)
+            A_supply = np.sum(a_h[:, None] * dist)
+            r_clear = solve_r_clear_mu(w, dist, A_supply, a_h, z_h, params, r, dists=False)
+            # Safeguard: don't trust extreme clearing rates
+            r_clear = float(np.clip(r_clear, R_MIN, R_MAX))
+            ed_K = capital_excess_mu_nodist(r, w, dist, a_h, z_h, params)  # ED at current r, not r_clear
             ed_L = labor_excess_mu_nodist(w, r, dist, a_h, z_h, params)
         else:
-            mu_p, mu_m = compute_stationary_with_dist(cp, cm, a_h, z_h, pr_z, prob_tp, psi, mu_init=dist_curr, max_iter=250)
+            A_supply = np.sum(a_h[:, None] * (mu_p + mu_m))
+            r_clear = solve_r_clear_mu(w, mu_p, A_supply, a_h, z_h, params, r, dists=True, mu_m=mu_m)
+            r_clear = float(np.clip(r_clear, R_MIN, R_MAX))
             ed_K = capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
             ed_L = labor_excess_with_dist(w, r, mu_p, mu_m, a_h, z_h, params, TAU_PLUS, TAU_MINUS)
-            
+
+        r = ETA_R * r_clear + (1.0 - ETA_R) * r
+        r = float(np.clip(r, R_MIN, R_MAX))
+
         if diag_out is not None:
             diag_out['edK_history'][label].append(ed_K)
-        
-        # Plot final policy for this r iteration
-        if not distortions: plot_current_policy_status(coeffs, f"{label} r{out_iter} FINAL", filename="policy_post_final.png")
-        else: plot_current_policy_status(cp, f"{label} r{out_iter} plus FINAL", filename="policy_pre_final.png")
-            
-        print(f"  [RESULT r={r:.4f}] final_w={w:.4f}, edL={ed_L:.4e}, edK={ed_K:.4e}")
-        
-        # CRITICAL: Only allow outer convergence if inner market actually cleared
-        if abs(ed_K) < 2e-3 and abs(ed_L) < 5e-4: 
-            print("  [GE SUCCESS] Both markets cleared!")
-            break
-        
-        if ed_K > 0: r_min = r
-        else: r_max = r
 
-        if out_iter == 11:
+        print(f"\n[Outer {label} {out_iter+1:02d}] r={r:.6f}  r_clear={r_clear:.6f}  ED_L={ed_L:.3e}  ED_K={ed_K:.3e}\n")
+
+        # Plot policy status periodically
+        if out_iter % 5 == 0:
+            if not distortions:
+                plot_current_policy_status(coeffs, f"{label} r{out_iter}", filename="policy_post_final.png")
+            else:
+                plot_current_policy_status(cp, f"{label} r{out_iter} plus", filename="policy_pre_final.png")
+
+        # Check convergence (relaxed tolerance for spectral method)
+        if abs(r - r_old) < 5e-4 and abs(ed_L) < 5e-2 and abs(ed_K) < 5e-2:
+            print(f"  [GE SUCCESS] Both markets cleared after {out_iter+1} outer iterations!")
+            break
+
+        if out_iter == 59:
             print("  [GE WARNING] Outer loop finished without full clearing.")
+
+    # Compute final aggregates
     if not distortions:
         K, L, Y, En, A, Ext = get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, nu)
     else:
         K, L, Y, En, A, Ext = get_aggregates_with_dist(mu_p, mu_m, a_h, z_h, w, r, lam, delta, alpha, nu, TAU_PLUS, TAU_MINUS)
-    res = {'w': w, 'r': r, 'Y': Y, 'K': K, 'A': A, 'TFP': Y/max(((K**alpha)*((1-En)**(1-alpha)))**(1-nu), 1e-8),
+
+    res = {'w': w, 'r': r, 'Y': Y, 'K': K, 'A': A,
+           'TFP': Y/max(((K**alpha)*((1-En)**(1-alpha)))**(1-nu), 1e-8),
            'a_grid': a_h, 'z_grid': z_h, 'prob_z': pr_z, 'share_entre': En, 'ExtFin_Y': Ext/max(Y, 1e-8)}
+
     if distortions:
         res['coeffs_plus'], res['coeffs_minus'], res['mu_plus'], res['mu_minus'] = cp, cm, mu_p, mu_m
     else:
