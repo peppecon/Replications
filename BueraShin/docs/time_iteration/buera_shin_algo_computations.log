@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.22 (TeX Live 2022/dev/Debian) (preloaded format=pdflatex 2026.1.30)  4 FEB 2026 09:37
+This is pdfTeX, Version 3.141592653-2.6-1.40.22 (TeX Live 2022/dev/Debian) (preloaded format=pdflatex 2026.1.30)  4 FEB 2026 09:52
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -341,28 +341,23 @@ LaTeX Font Info:    Trying to load font information for U+msb on input line 18.
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 ) [1
 
-{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]
-Overfull \hbox (3.32706pt too wide) in paragraph at lines 75--76
-\OT1/cmr/m/n/10 Let $\OT1/cmr/bx/n/10 ^^H\OT1/cmr/m/n/10 (\OML/cmm/m/it/10 a; z\OT1/cmr/m/n/10 )$ be the vec-tor of bi-vari-ate Cheby-shev ba-sis func-tions, such that the sav-ings pol-icy is $[](\OML/cmm/m/it/10 a; z\OT1/cmr/m/n/10 ; \OML/cmm/b/it/10 C\OT1/cmr/m/n/10 ) =
- []
-
-[2] [3] (./buera_shin_algo_computations.aux)
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}] [2] [3] (./buera_shin_algo_computations.aux)
 Package rerunfilecheck Info: File `buera_shin_algo_computations.out' has not changed.
-(rerunfilecheck)             Checksum: 48F934E064E7FAA74A62D2157A2F2A73;3168.
+(rerunfilecheck)             Checksum: 0821FCB014113126CBC67CAC295C787D;2672.
  ) 
 Here is how much of TeX's memory you used:
- 10127 strings out of 480247
- 153745 string characters out of 5896151
- 458695 words of memory out of 5000000
- 27904 multiletter control sequences out of 15000+600000
+ 10119 strings out of 480247
+ 153682 string characters out of 5896151
+ 457695 words of memory out of 5000000
+ 27902 multiletter control sequences out of 15000+600000
  482033 words of font info for 75 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
- 60i,6n,63p,534b,415s stack positions out of 5000i,500n,10000p,200000b,80000s
+ 60i,8n,63p,492b,334s stack positions out of 5000i,500n,10000p,200000b,80000s
 </usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi5.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmib10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr12.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy5.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb>
-Output written on buera_shin_algo_computations.pdf (3 pages, 201265 bytes).
+Output written on buera_shin_algo_computations.pdf (3 pages, 196329 bytes).
 PDF statistics:
- 194 PDF objects out of 1000 (max. 8388607)
- 155 compressed objects within 2 object streams
- 41 named destinations out of 1000 (max. 500000)
- 121 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 179 PDF objects out of 1000 (max. 8388607)
+ 140 compressed objects within 2 object streams
+ 35 named destinations out of 1000 (max. 500000)
+ 105 words of extra memory for PDF output out of 10000 (max. 10000000)
 

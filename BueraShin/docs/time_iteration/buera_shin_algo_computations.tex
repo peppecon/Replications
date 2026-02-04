@@ -58,67 +58,64 @@ where the continuation value is:
     \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \int V(a', z') \pi(z') dz'
 \end{equation}
 
-\subsection{The Euler Equation}
-The first-order condition for the optimal savings $a'$ (assuming an interior solution) is given by the Euler equation:
+\subsection{Derivation of the Euler Equation}
+To solve the household's problem, we substitute $c_t = y(a_t, z_t) - a_{t+1}$ into the value function:
 \begin{equation}
-    c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ]
+    V(a_t, z_t) = \max_{a_{t+1}} \left\{ \frac{(y(a_t, z_t) - a_{t+1})^{1-\sigma} - 1}{1-\sigma} + \beta \mathbb{E}[V(a_{t+1}, z_{t+1}) | z_t] \right\}
 \end{equation}
-Defining marginal utility as $MU(a, z) = (y(a, z) - a'(a, z))^{-\sigma}$, the equation becomes:
+The first-order condition with respect to $a_{t+1}$ is:
 \begin{equation}
-    MU(a, z) = \beta (1+r) \left[ \psi MU(a', z) + (1-\psi) \int MU(a', z') \pi(z') dz' \right]
+    -(y(a_t, z_t) - a_{t+1})^{-\sigma} + \beta \mathbb{E}\left[ \frac{\partial V(a_{t+1}, z_{t+1})}{\partial a_{t+1}} \right] = 0
 \end{equation}
+From the Envelope Theorem, the derivative of the value function with respect to assets is:
+\begin{equation}
+    \frac{\partial V(a_t, z_t)}{\partial a_t} = (y(a_t, z_t) - a_{t+1})^{-\sigma} \cdot \frac{\partial y(a_t, z_t)}{\partial a_t} = (1+r) c_t^{-\sigma}
+\end{equation}
+Leading to the stochastic Euler equation: $c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ]$.
+
+\section{Spectral Discretization and Setup}
+The policy function $a'(a, z)$ is approximated by a bivariate Chebyshev polynomial $\hat{a}(a, z; \bm{\gamma})$.
+
+\subsection{Chebyshev Collocation Nodes}
+The state space is discretized using the zeros of the $N$-th degree Chebyshev polynomial $\xi \in [-1, 1]$:
+\begin{equation}
+    \xi_k = \cos \left( \frac{2k - 1}{2N} \pi \right), \quad k \in \{1, \dots, N\}
+\end{equation}
+The nodes are mapped to the physical state space $(a, z)$. For assets, we use a log-linear mapping to cluster nodes near the borrowing constraint:
+\begin{equation}
+    a_k = \exp\left( \frac{\ln(a_{max} + \text{shift}) + \ln(a_{min} + \text{shift})}{2} + \xi_k \frac{\ln(a_{max} + \text{shift}) - \ln(a_{min} + \text{shift})}{2} \right) - \text{shift}
+\end{equation}
+while ability nodes $z_j$ are mapped linearly.
 
 \section{Spectral Time Iteration Logic}
-The policy function $a'(a, z)$ is approximated by a bivariate Chebyshev polynomial $\hat{a}(a, z; \bm{C})$.
-
-\subsection{Detailed First-Order Condition in Spectral Form}
-Let $\bm{\Phi}(a, z)$ be the vector of bivariate Chebyshev basis functions, such that the savings policy is $\hat{a}(a, z; \bm{C}) = \bm{\Phi}(a, z)^\top \bm{C}$. The household's optimal choice $a'$ satisfies the following first-order condition:
+\subsection{Pointwise Euler Inversion}
+To solve for the optimal policy, we utilize a recursive operator that linearizes the Global Euler Equation. At each collocation node $(a_i, z_j)$, we define the \textbf{Target Function} $F(a')$ as the difference between current marginal utility and expected future marginal utility:
 \begin{equation}
-    F(a', a, z; \bm{C}) \equiv [y(a, z) - a']^{-\sigma} - \beta(1+r) \left[ \psi \text{MU}' + (1-\psi) \mathbb{E}_{z'} \text{MU}' \right] = 0
+    F(a'; a_i, z_j, \bm{\gamma}^{(n)}) \equiv \underbrace{(y_i - a')^{-\sigma}}_{\text{Current MU}} - \beta(1+r) \underbrace{\mathcal{E}(a'; \bm{\gamma}^{(n)})}_{\text{Continuation MU}}
 \end{equation}
-where the next-period marginal utility $\text{MU}'$ is evaluated using the \textbf{known} coefficients $\bm{C}$ from the previous iteration:
+where $\mathcal{E}$ is the expectation over future states $(\hat{a}_i, z')$ given the \textbf{known} continuation policy $\bm{\gamma}^{(n)}$:
 \begin{equation}
-    \text{MU}'(a', z'; \bm{C}) = \left[ y(a', z') - \bm{\Phi}(a', z')^\top \bm{C} \right]^{-\sigma}
+    \mathcal{E}(a'; \bm{\gamma}^{(n)}) = \psi \left( y(a', z_j) - \bm{\Phi}(a', z_j)^\top \bm{\gamma}^{(n)} \right)^{-\sigma} + (1-\psi) \sum_k \pi_k \left( y(a', z_k) - \bm{\Phi}(a', z_k)^\top \bm{\gamma}^{(n)} \right)^{-\sigma}
 \end{equation}
-In this formulation, $a'$ is the target savings level for the current period (the variable we solve for), while $\bm{C}$ defines the behavior of the agent from $t+1$ onwards. The spectral method is powerful because $\bm{\Phi}(a', z')$ and its derivatives are defined for any $a' \in [a_{min}, a_{max}]$, allowing us to solve $F(a')=0$ using continuous root-finding methods (e.g., Brent's method) or by direct inversion.
-
-\subsection{Grid and Mapping}
-Chebyshev polynomials are defined on $x \in [-1, 1]$. We map the state space:
-\begin{enumerate}
-    \item \textbf{Assets}: $x_a = 2 \frac{\ln(a + \text{shift}) - \ln(a_{min} + \text{shift})}{\ln(a_{max} + \text{shift}) - \ln(a_{min} + \text{shift})} - 1$
-    \item \textbf{Ability}: $x_z = 2 \frac{z - z_{min}}{z_{max} - z_{min}} - 1$
-\end{enumerate}
-We choose $N_a$ and $N_z$ nodes in each dimension, resulting in $N = N_a \times N_z$ collocation points.
-
-\subsection{The Iterative Step (Time Iteration)}
-Given a current set of coefficients $\bm{C}^{(n)}$:
-\begin{enumerate}
-    \item \textbf{Expectation Integration}: For each Chebyshev node $(a_i, z_j)$, compute the next-period asset $a' = \hat{a}(a_i, z_j; \bm{C}^{(n)})$.
-    \item \textbf{Marginal Utility at $t+1$}: Evaluate $MU(a', z_k; \bm{C}^{(n)})$ for all $z_k$ in a quadrature grid. The integral is computed as:
-    \begin{equation}
-        \mathbb{E}[MU] = (1-\psi) \sum_k w_k MU(a', z_k; \bm{C}^{(n)}) + \psi MU(a', z_j; \bm{C}^{(n)})
-    \end{equation}
-    \item \textbf{Invert Euler Equation}: Find the target consumption $c^* = [\beta (1+r) \mathbb{E}[MU]]^{-1/\sigma}$.
-    \item \textbf{Compute New Policy}: The target savings is $a^*_{target} = y(a_i, z_j) - c^*$. We apply the constraint $a' = \max\{a_{min}, a^*_{target}\}$.
-    \item \textbf{Update Coefficients}: Solve the linear system $\bm{T} \bm{C}^{(n+1)} = \bm{a}^*$, where $\bm{T}$ is the matrix of Chebyshev polynomials evaluated at the nodes.
-\end{enumerate}
-
-\subsection{Coefficient Transformation}
-The coefficients $\bm{C}$ are related to the values at the collocation nodes $\bm{A}^*$ via the basis matrix $\bm{T}$. Since the bivariate basis is a Kronecker product of the univariate bases $\bm{T} = \bm{T}_z \otimes \bm{T}_a$, the update can be written as:
+Since $\mathcal{E}$ is fixed for a given guess of $a'$, we can identify the optimal $a^*_{target}$ by direct inversion:
 \begin{equation}
-    \bm{C}^{(n+1)} = (\bm{T}_z^{-1} \otimes \bm{T}_a^{-1}) \bm{A}^*
+    a^*_{target, i} = \max\{a_{min}, y_i - \left[ \beta(1+r) \mathcal{E}(a'; \bm{\gamma}^{(n)}) \right]^{-1/\sigma} \}
 \end{equation}
-In practice, this is solved efficiently using matrix inversions of the smaller univariate matrices.
+This formulation depends exclusively on the grid points $(a_i, z_j)$ and the candidate savings $a'$, with the future behavior already "baked" into the coefficients $\bm{\gamma}^{(n)}$.
 
-\section{Coupled Spectral Solver for Distorted Economies}
-In the pre-reform state, agents face idiosyncratic distortions $\tau \in \{\tau^+, \tau^-\}$. The implementation maintains two distinct policy approximations $\hat{a}^+(a, z)$ and $\hat{a}^-(a, z)$.
-
-\subsection{Coupled Euler Equations}
-The Euler equations for the two types are coupled through the ability reset process:
+\subsection{Damped Coefficient Update}
+The algorithm computes the new policy nodes $\bm{A}^*_{new}$ by applying a damping parameter $\theta \in (0, 1]$ to ensure numerical stability:
 \begin{equation}
-    MU^\tau(a, z) = \beta (1+r) \left[ \psi MU^\tau(\hat{a}^\tau, z) + (1-\psi) \mathbb{E}_{z'} [ \hat{p}(z') MU^+(\hat{a}^\tau, z') + (1-\hat{p}(z')) MU^-(\hat{a}^\tau, z') ] \right]
+    \bm{A}^{*}_{new} = (1-\theta) \bm{A}^{*}_{old} + \theta \bm{A}^*_{target}
 \end{equation}
-where $\hat{p}(z')$ is the probability of drawing the $\tau^+$ distortion conditional on new ability $z'$. This requires a joint iteration on both sets of coefficients until $\bm{C}^+$ and $\bm{C}^-$ stabilize.
+The updated spectral coefficients $\bm{\gamma}^{(n+1)}$ are then obtained by solving the linear basis transformation:
+\begin{equation}
+    \bm{\gamma}^{(n+1)} = \bm{T}^{-1} \bm{A}^{*}_{new}
+\end{equation}
+where $\bm{T}$ is the matrix of Chebyshev basis functions evaluated at the collocation nodes.
+
+
+
 
 \section{Distributional and Transition Dynamics}
 The distribution is tracked on a dense grid using a Markov transition matrix $Q$ derived from the continuous policy $\hat{a}$.

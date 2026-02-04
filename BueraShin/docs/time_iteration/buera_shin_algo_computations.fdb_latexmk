@@ -1,7 +1,7 @@
 # Fdb version 3
-["pdflatex"] 1770194229 "/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/docs/time_iteration/buera_shin_algo_computations.tex" "buera_shin_algo_computations.pdf" "buera_shin_algo_computations" 1770194229
+["pdflatex"] 1770195126 "/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/docs/time_iteration/buera_shin_algo_computations.tex" "buera_shin_algo_computations.pdf" "buera_shin_algo_computations" 1770195127
   "/etc/texmf/web2c/texmf.cnf" 1674581833 475 c0e671620eb5563b2130f56340a5fde8 ""
-  "/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/docs/time_iteration/buera_shin_algo_computations.tex" 1770194161 8353 0dcaab3e4722a65e4d3b02bfdda0f858 ""
+  "/home/nuagsire/Dropbox/PhD Bocconi/Replications/BueraShin/docs/time_iteration/buera_shin_algo_computations.tex" 1770195090 7530 5f95543d60f7054072db7d07cd2b7575 ""
   "/usr/share/texlive/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/public/amsfonts/cmextra/cmbsy5.tfm" 1246382020 1120 1e8878807317373affa7f7bba4cf2f6a ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/public/amsfonts/cmextra/cmbsy6.tfm" 1246382020 1124 14ccf5552bc7f77ca02a8a402bea8bfb ""
@@ -109,9 +109,9 @@
   "/usr/share/texmf/web2c/texmf.cnf" 1644012257 39432 7155514e09a3d69036fac785183a21c2 ""
   "/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map" 1706541861 325460 1cee8f8dee02d4e22d8f26e9f8df0176 ""
   "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1769749708 1405649 911be00c83c42b20a639299088713496 ""
-  "buera_shin_algo_computations.aux" 1770194229 2675 0f216997ee3912f077717a13de8190ba "pdflatex"
-  "buera_shin_algo_computations.out" 1770194229 3168 48f934e064e7faa74a62d2157a2f2a73 "pdflatex"
-  "buera_shin_algo_computations.tex" 1770194161 8353 0dcaab3e4722a65e4d3b02bfdda0f858 ""
+  "buera_shin_algo_computations.aux" 1770195126 2391 7fd6a4185ce66712fdf5659c6af44123 "pdflatex"
+  "buera_shin_algo_computations.out" 1770195126 2672 0821fcb014113126cbc67cac295c787d "pdflatex"
+  "buera_shin_algo_computations.tex" 1770195090 7530 5f95543d60f7054072db7d07cd2b7575 ""
   (generated)
   "buera_shin_algo_computations.aux"
   "buera_shin_algo_computations.log"
