@@ -43,7 +43,7 @@ A_SHIFT = 1.0
 # Paper's discretization (v3 bounds): M=0.633 (e ~ 1.2675) and 0.9995 (e ~ 6.2164)
 # Z_MIN, Z_MAX = (1 - 0.633)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
 Z_MIN, Z_MAX = (1 - 0.001)**(-1/4.15), (1 - 0.9995)**(-1/4.15)
-N_CHEBY_A = 30
+N_CHEBY_A = 20
 N_CHEBY_Z = 20  
 
 # Simulation Parameters
@@ -331,8 +331,8 @@ def find_equilibrium(params, method='analytical', fixed_shocks=None, w_init=1.5,
             w *= 0.98; print(f"  [{it+1}] !!! COLLAPSE - w reset"); continue
         ws = 1.0 - share_en
         eL, eK = (L_d - ws)/max(ws, 0.05), (K_agg - A_agg)/max(A_agg, 1.0)
-        print(f"  [{it+1}] w={w:.8f}, r={r:.8f} | K={K_agg:.8f}, A={A_agg:.8f} | Ld={L_d:.8f}, Ls={ws:.8f}")
-        if abs(eL) + abs(eK) < 2e-4: break
+        print(f"  [{it+1}] w={w:.4f}, r={r:.4f} | K={K_agg:.4f}, A={A_agg:.4f} | Ld={L_d:.4f}, Ls={ws:.4f}")
+        if abs(eL) + abs(eK) < 2e-3: break
         if it > 0:
             if eL * exc_L_p < 0: w_step *= 0.5
             else: w_step = min(w_step * 1.05, 0.2)
