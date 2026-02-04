@@ -58,20 +58,20 @@ where the continuation value is:
     \text{Cont}(a', z) = \psi V(a', z) + (1-\psi) \int V(a', z') \pi(z') dz'
 \end{equation}
 
-\subsection{Derivation of the Euler Equation}
-To solve the household's problem, we substitute $c_t = y(a_t, z_t) - a_{t+1}$ into the value function:
+\subsection{Derivation of the Euler Equation and KKT Conditions}
+To solve the household's problem under the borrowing constraint $a_{t+1} \geq a_{min}$, we form the Lagrangian:
 \begin{equation}
-    V(a_t, z_t) = \max_{a_{t+1}} \left\{ \frac{(y(a_t, z_t) - a_{t+1})^{1-\sigma} - 1}{1-\sigma} + \beta \mathbb{E}[V(a_{t+1}, z_{t+1}) | z_t] \right\}
+    \mathcal{L} = \mathbb{E}_0 \sum_{t=0}^{\infty} \beta^t \left[ \frac{c_t^{1-\sigma}-1}{1-\sigma} + \mu_t (a_{t+1} - a_{min}) \right]
 \end{equation}
-The first-order condition with respect to $a_{t+1}$ is:
+Substituting $c_t = y(a_t, z_t) - a_{t+1}$, the first-order condition with respect to $a_{t+1}$ is:
 \begin{equation}
-    -(y(a_t, z_t) - a_{t+1})^{-\sigma} + \beta \mathbb{E}\left[ \frac{\partial V(a_{t+1}, z_{t+1})}{\partial a_{t+1}} \right] = 0
+    -c_t^{-\sigma} + \beta \mathbb{E}_t [ (1+r) c_{t+1}^{-\sigma} ] + \mu_t = 0 \implies c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ] + \mu_t
 \end{equation}
-From the Envelope Theorem, the derivative of the value function with respect to assets is:
+The Lagrange multiplier $\mu_t$ must satisfy the Karush-Kuhn-Tucker (KKT) complementarity conditions:
 \begin{equation}
-    \frac{\partial V(a_t, z_t)}{\partial a_t} = (y(a_t, z_t) - a_{t+1})^{-\sigma} \cdot \frac{\partial y(a_t, z_t)}{\partial a_t} = (1+r) c_t^{-\sigma}
+    \mu_t \geq 0, \quad a_{t+1} \geq a_{min}, \quad \mu_t (a_{t+1} - a_{min}) = 0
 \end{equation}
-Leading to the stochastic Euler equation: $c_t^{-\sigma} = \beta (1+r) \mathbb{E}_t [ c_{t+1}^{-\sigma} ]$.
+When the agent is unconstrained ($\mu_t = 0$), the standard Euler equation holds. When the constraint binds ($a_{t+1} = a_{min}$), we have $\mu_t > 0$, implying $c_t^{-\sigma} > \beta (1+r) \mathbb{E}_t [c_{t+1}^{-\sigma}]$.
 
 \section{Spectral Discretization and Setup}
 The policy function $a'(a, z)$ is approximated by a bivariate Chebyshev polynomial $\hat{a}(a, z; \bm{\gamma})$.
@@ -97,10 +97,11 @@ where $\mathcal{E}$ is the expectation over future states $(\hat{a}_i, z')$ give
 \begin{equation}
     \mathcal{E}(a'; \bm{\gamma}^{(n)}) = \psi \left( y(a', z_j) - \bm{\Phi}(a', z_j)^\top \bm{\gamma}^{(n)} \right)^{-\sigma} + (1-\psi) \sum_k \pi_k \left( y(a', z_k) - \bm{\Phi}(a', z_k)^\top \bm{\gamma}^{(n)} \right)^{-\sigma}
 \end{equation}
-Since $\mathcal{E}$ is fixed for a given guess of $a'$, we can identify the optimal $a^*_{target}$ by direct inversion:
+Since $\mathcal{E}$ is fixed for a given guess of $a'$, we can identify the optimal $a^*_{target}$ by direct inversion. The solver handles the KKT conditions robustly by applying the non-negativity constraint after the unconstrained inversion:
 \begin{equation}
     a^*_{target, i} = \max\{a_{min}, y_i - \left[ \beta(1+r) \mathcal{E}(a'; \bm{\gamma}^{(n)}) \right]^{-1/\sigma} \}
 \end{equation}
+This "max" operator ensures that when the implied savings would fall below $a_{min}$, the agent is snapped to the constraint, implicitly satisfying $\mu_t > 0$.
 This formulation depends exclusively on the grid points $(a_i, z_j)$ and the candidate savings $a'$, with the future behavior already "baked" into the coefficients $\bm{\gamma}^{(n)}$.
 
 \subsection{Damped Coefficient Update}
