@@ -53,7 +53,7 @@ T_SIM = 500
 # Optimized Bivariate spectral tools
 # =============================================================================
 
-@njit(cache=True)
+@njit(cache=False)
 def bivariate_eval(a, z, coeffs, a_min, a_max, z_min, z_max):
     na, nz = N_CHEBY_A, N_CHEBY_Z
     la, lmin, lmax = np.log(a + A_SHIFT), np.log(a_min + A_SHIFT), np.log(a_max + A_SHIFT)
@@ -119,7 +119,7 @@ def generate_bivariate_nodes_matrix(a_min, a_max, z_min, z_max):
 # Entrepreneur Logic
 # =============================================================================
 
-@njit(cache=True)
+@njit(cache=False)
 def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
     rental = max(r + delta, 1e-8)
     wage = max(w, 1e-8)
@@ -140,7 +140,7 @@ def solve_entrepreneur_single(a, z, w, r, lam, delta, alpha, upsilon):
 # Policy Iteration
 # =============================================================================
 
-@njit(cache=True, parallel=True)
+@njit(cache=False, parallel=True)
 def solve_policy_bivariate_update(coeffs, nodes_a, nodes_z, T_az_inv, 
                                  beta, sigma, psi, w, r, lam, delta, alpha, upsilon, 
                                  a_min, a_max, z_min, z_max, 
@@ -201,7 +201,7 @@ def solve_policy_spectral(params, w, r, coeffs_init=None):
 # Stationary Distribution Logic
 # =============================================================================
 
-@njit(cache=True)
+@njit(cache=False)
 def get_interpolation_weights(x, grid):
     n = len(grid)
     if x <= grid[0]: return 0, 1.0, 0.0
@@ -253,7 +253,7 @@ def compute_stationary_analytical(coeffs, a_grid, z_grid, prob_z, psi, mu_init=N
             mu = mu_new
     return (mu / mu.sum()).reshape((na, nz))
 
-@njit(cache=True, parallel=True)
+@njit(cache=False, parallel=True)
 def simulation_step_parallel(a_curr, z_curr, coeffs, reset_shocks, shocks_raw, eta):
     n = len(a_curr)
     a_next, z_next = np.zeros(n), np.zeros(n)
@@ -265,7 +265,7 @@ def simulation_step_parallel(a_curr, z_curr, coeffs, reset_shocks, shocks_raw, e
         a_next[i] = bivariate_eval(a_curr[i], z_next[i], coeffs, A_MIN, A_MAX, Z_MIN, Z_MAX)
     return a_next, z_next
 
-@njit(cache=True, parallel=True)
+@njit(cache=False, parallel=True)
 def get_aggregates_parallel(a_vec, z_vec, w, r, lam, delta, alpha, upsilon):
     n = len(a_vec)
     K, L, Y, En, A, E = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -280,7 +280,7 @@ def get_aggregates_parallel(a_vec, z_vec, w, r, lam, delta, alpha, upsilon):
 # GE Solver
 # =============================================================================
 
-@njit(cache=True)
+@njit(cache=False)
 def get_aggregates_analytical(dist, a_h, z_h, w, r, lam, delta, alpha, upsilon):
     na, nz = len(a_h), len(z_h)
     K, L, Y, En, A, Ext = 0., 0., 0., 0., 0., 0.
