@@ -302,7 +302,7 @@ def plot_wealth_distribution(steady_states_path, outdir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=str, default="outputs_final", help="Directory containing .npz files")
+    parser.add_argument("--out", type=str, default="outputs", help="Directory containing .npz files")
     args = parser.parse_args()
 
     print(f"Generating fancy plots from: {args.out}")

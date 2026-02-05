@@ -26,7 +26,7 @@ Plot:
 - Interest rate plotted as (1+r)/(1+r_pre) for a clean normalization even if r_pre < 0.
 
 Run:
-  python buera_shin_transition_B2_fastclear.py --T 125 --na 601 --amax 200 --N 350000 --out outputs
+  python transition_howard.py --T 125 --na 1200 --amax 300 --N 350000 --out outputs
 
 Tip (debug faster):
   python ... --N 50000 --T 60 --na 401
