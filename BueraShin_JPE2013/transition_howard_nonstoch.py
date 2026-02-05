@@ -1148,6 +1148,10 @@ def steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N, burn, seed=77, ve
     mu_p /= (mu_p.sum() + mu_m.sum())
     mu_m /= (mu_p.sum() + mu_m.sum())
 
+    # initial guesses
+    w = 0.55
+    r = -0.05
+
     for outer in range(80):
         r_old = r
 
