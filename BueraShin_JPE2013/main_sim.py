@@ -52,11 +52,11 @@ def create_ability_grid_paper(eta):
     Paper's exact 40-point ability discretization.
     Dynamically computed based on ETA to ensure consistent scale.
     """
-    n_z = 40
+    n_z = 100
     M_values = np.zeros(n_z)
-    M_values[:38] = np.linspace(0.633, 0.998, 38)
-    M_values[38] = 0.999
-    M_values[39] = 0.9995
+    M_values[:98] = np.linspace(0.0001, 0.998, 98)
+    M_values[98] = 0.999
+    M_values[99] = 0.9995
     z_grid = (1 - M_values) ** (-1/eta)
 
     prob_z = np.zeros(n_z)
@@ -566,9 +566,9 @@ if __name__ == "__main__":
     total_start = time.time()
 
     # Grid parameters
-    n_a = 2001
+    n_a = 1001
     a_min = 1e-6
-    a_max = 4000
+    a_max = 500
     a_scale = 3
 
     print("\n1. Setting up model grids...")
@@ -621,7 +621,7 @@ if __name__ == "__main__":
     print("2. Computing Figure 2: Long-run Effect of Financial Frictions")
     print("=" * 60)
 
-    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.2, 1.15, 1.1, 1.0]
+    lambda_values = [np.inf, 2.0, 1.75, 1.5, 1.25, 1.2, 1.15, 1.1, 1.05]
 
     initial_guesses = {
         np.inf: (0.80, -0.04),

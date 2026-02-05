@@ -1,33 +1,47 @@
-# Buera & Shin (2010/2013) JPE Replication
+# Buera & Shin (2013) - Replication
 
-This repository contains a high-performance replication of **Buera & Shin (2013), "Financial Frictions and the Persistence of History: A Quantitative Exploration"**, published in the *Journal of Political Economy*.
+This repository contains a Python replication of the model in **"Financial Frictions and the Persistence of History"** by Francisco J. Buera and Yongseok Shin (Journal of Political Economy, 2013).
 
-## 🚀 Key Features
-- **Spectral Collocation Solver**: Uses bivariate Chebyshev polynomials for extreme precision and speed.
-- **Matrix-Vector Architecture**: Leverages BLAS-optimized tensor contractions ($T_a C T_z^T$).
-- **Hybrid Stationary Distribution**: Built-in Analytical (Histogram) and Simulation (Monte Carlo) methods.
-- **Warm-Start Power Iteration**: Rapid market-clearing for General Equilibrium prices.
+## Scripts Overview
 
-## 📁 Repository Structure
-- `main_spectral.py`: The state-of-the-art supercharged spectral solver (v6).
-- `benchmark_vfi.py`: A robust Value Function Iteration (VFI) benchmark (v2) for verification.
-- `shared_library/`: Vectorized utility functions for spectral basis recursion.
-- `results/`: Output plots and Figure 2 replication results.
+The repository includes several scripts implementing stationary equilibrium and transition dynamics using different numerical methods:
 
-## 🛠 Usage
-Ensure you have `numpy`, `scipy`, `matplotlib`, and `numba` installed.
+### Stationary Equilibrium
+- **[main_sim.py](main_sim.py)**: Computes the stationary equilibrium using Value Function Iteration (VFI) with Howard acceleration and a simulation-based stationary distribution.
+- **[main_cheb.py](main_cheb.py)**: Computes the stationary equilibrium using Chebyshev spectral collocation and an analytical stationary distribution (Power Iteration).
+- **[benchmark_vfi.py](benchmark_vfi.py)**: A performance-optimized VFI benchmark for the stationary equilibrium.
 
-### Run the Spectral Solver (Recommended)
+### Transition Dynamics
+- **[transition_howard.py](transition_howard.py)**: Implements transition dynamics using VFI with Howard acceleration and Monte Carlo simulation for market clearing.
+- **[transition_cheb.py](transition_cheb.py)**: Implements transition dynamics using Chebyshev spectral collocation and a nested solver.
+- **[transition_sim.py](transition_sim.py)**: Implements the simulation-based transition dynamics following Algorithm B.2 in the paper's appendix.
+
+### Plotting
+- **[plot_paper_figures.py](plot_paper_figures.py)**: Generates the main figures of the paper, including policy functions, transition dynamics, and wealth/ability distributions.
+
+## Methodology and Documentation
+
+The project explores two main numerical methods for solving the model. Detailed documentation for each is available in the `docs` folder:
+
+1. **Chebyshev Functional Approximation**: Located in [`docs/time_iteration`](docs/time_iteration). This method uses spectral collocation to approximate the value and policy functions.
+2. **Howard Policy Improvement for VFI**: Located in [`docs/howard_policy_improvement`](docs/howard_policy_improvement). This method accelerates standard VFI by performing multiple value updates for a fixed policy.
+
+> [!IMPORTANT]
+> The **Howard Policy Improvement** method is simpler to implement and works significantly better in terms of stability and performance for this specific model.
+
+## Usage
+
+To run the main simulation for the stationary equilibrium:
 ```bash
-python main_spectral.py --method analytical
+python main_sim.py
 ```
 
-### Run the VFI Benchmark
+To compute the transition path:
 ```bash
-python benchmark_vfi.py
+python transition_howard.py
 ```
 
-## 📊 Replication (Figure 2)
-The spectral solver produces a 1x2 plot comparing GDP, TFP, and Interest Rates across different financial development regimes ($\lambda$).
-
-![Figure 2 Replication](results/figure2.png)
+To generate the plots after running the simulations:
+```bash
+python plot_paper_figures.py
+```
