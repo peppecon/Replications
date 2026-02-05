@@ -36,6 +36,28 @@ def interpolate_policy(a_dense, a_grid, pol_idx, z_idx):
     
     return pol_dense
 
+def interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, pol_idx):
+    """
+    Performs 2D interpolation for the policy surface.
+    pol_idx is (n_a, n_z) indices.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    
+    # Get values on the original grid
+    vals = a_grid[pol_idx]
+    
+    # Setup interpolator
+    interp = RegularGridInterpolator((a_grid, z_grid), vals, bounds_error=False, fill_value=None)
+    
+    # Create meshgrid for dense points
+    AA, ZZ = np.meshgrid(a_dense, z_dense, indexing='ij')
+    points = np.stack([AA.ravel(), ZZ.ravel()], axis=-1)
+    
+    # Interpolate
+    pol_dense = interp(points).reshape(AA.shape)
+    
+    return AA, ZZ, pol_dense
+
 def plot_policy_functions(steady_states_path, outdir):
     if not os.path.exists(steady_states_path):
         print(f"File not found: {steady_states_path}")
@@ -66,9 +88,9 @@ def plot_policy_functions(steady_states_path, outdir):
     # --- Plot Pre-Reform ---
     ax = axes[0]
     pol_high = interpolate_policy(a_dense, a_grid, pre_polp, idx_high)
-    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.1f})')
+    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.2f})')
     pol_med = interpolate_policy(a_dense, a_grid, pre_polp, idx_med)
-    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.1f})')
+    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.2f})')
     ax.plot(a_dense, a_dense, color='gray', linestyle=':', linewidth=2.0)
     ax.set_title("Pre-Reform Steady State")
     ax.set_xlabel(r"Current Assets $a$")
@@ -87,9 +109,9 @@ def plot_policy_functions(steady_states_path, outdir):
     # --- Plot Post-Reform ---
     ax = axes[1]
     pol_high = interpolate_policy(a_dense, a_grid, post_pol, idx_high)
-    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.1f})')
+    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.2f})')
     pol_med = interpolate_policy(a_dense, a_grid, post_pol, idx_med)
-    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.1f})')
+    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.2f})')
     pol_high_raw = a_grid[post_pol[mask_grid, idx_high]]
     pol_med_raw = a_grid[post_pol[mask_grid, idx_med]]
     ax.scatter(ag_sub, pol_high_raw, s=10, color='#D62728', alpha=0.3, label='Grid Points')
@@ -106,9 +128,8 @@ def plot_policy_functions(steady_states_path, outdir):
         ax.spines['top'].set_visible(False)
 
     plt.tight_layout()
-    save_path = os.path.join(outdir, "fig_policy_functions.pdf")
+    save_path = os.path.join(outdir, "fig_policy_functions.png")
     plt.savefig(save_path)
-    plt.savefig(save_path.replace('.pdf', '.png'))
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -231,9 +252,8 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
             ax.set_xlim(-4, 20)
 
     plt.tight_layout()
-    save_path = os.path.join(outdir, "fig_paper_replication.pdf")
+    save_path = os.path.join(outdir, "fig_paper_replication.png")
     plt.savefig(save_path)
-    plt.savefig(save_path.replace('.pdf', '.png'))
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -294,9 +314,86 @@ def plot_wealth_distribution(steady_states_path, outdir):
     ax.grid(True, linestyle=':', alpha=0.3)
     
     plt.tight_layout()
-    save_path = os.path.join(outdir, "fig_wealth_distribution.pdf")
+    save_path = os.path.join(outdir, "fig_wealth_distribution.png")
     plt.savefig(save_path)
-    plt.savefig(save_path.replace('.pdf', '.png'))
+    plt.close()
+    print(f"Generated: {save_path}")
+
+def plot_ability_distribution(steady_states_path, outdir):
+    if not os.path.exists(steady_states_path):
+        print(f"File not found: {steady_states_path}")
+        return
+
+    data = np.load(steady_states_path)
+    z_grid = data['z_grid']
+    
+    # Re-calculate prob_z based on the same logic as the main script
+    # Pareto PDF: f(z) = eta * z^(-eta-1)
+    eta = 4.15
+    pdf = eta * (z_grid ** (-eta - 1))
+    
+    # Normalize to show relative mass
+    pdf_norm = pdf / np.sum(pdf)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    ax.bar(z_grid, pdf_norm, width=0.02, color='#1F77B4', alpha=0.7, label='Grid Point Probability Mass')
+    ax.plot(z_grid, pdf_norm, color='#D62728', marker='o', markersize=4, linestyle='--', linewidth=1, label='PDF Trend')
+    
+    ax.set_title("Ability Distribution (z-grid)")
+    ax.set_xlabel("Ability $z$")
+    ax.set_ylabel("Probability Mass")
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.grid(True, linestyle=':', alpha=0.3)
+    
+    plt.tight_layout()
+    save_path = os.path.join(outdir, "fig_ability_distribution.png")
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Generated: {save_path}")
+
+def plot_policy_functions_3d(steady_states_path, outdir):
+    if not os.path.exists(steady_states_path):
+        print(f"File not found: {steady_states_path}")
+        return
+
+    data = np.load(steady_states_path)
+    a_grid = data['a_grid']
+    z_grid = data['z_grid']
+    post_pol = data['post_pol']  # shape (n_a, n_z)
+    
+    # Create dense grid specifically for 3D visualization
+    limit_a = 50.0  # Focused on the most active part of the distribution
+    a_dense = np.linspace(a_grid[0], limit_a, 40)
+    z_dense = np.linspace(z_grid[0], z_grid[-1], 30)
+    
+    AA, ZZ, pol_dense = interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, post_pol)
+
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Plot surface
+    surf = ax.plot_surface(AA, ZZ, pol_dense, cmap='viridis', edgecolor='none', alpha=0.8)
+    
+    # Add wireframe for better perspective
+    ax.plot_wireframe(AA, ZZ, pol_dense, color='black', linewidth=0.3, alpha=0.3)
+    
+    # Set labels
+    ax.set_xlabel(r"Current Assets $a$")
+    ax.set_ylabel(r"Ability $z$")
+    ax.set_zlabel(r"Next Period Assets $a'$")
+    ax.set_title("Post-Reform Asset Policy Function $a'(a, z)$")
+    
+    # Colorbar
+    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label="Next Period Assets")
+    
+    # Improve view angle
+    ax.view_init(elev=25, azim=-125)
+    
+    save_path = os.path.join(outdir, "fig_policy_3d.png")
+    plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -313,6 +410,8 @@ def main():
     plot_policy_functions(steady_path, args.out)
     plot_wealth_distribution(steady_path, args.out)
     plot_transition_dynamics(trans_path, args.out)
+    plot_ability_distribution(steady_path, args.out)
+    plot_policy_functions_3d(steady_path, args.out)
 
 if __name__ == "__main__":
     main()

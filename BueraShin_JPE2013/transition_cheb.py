@@ -965,10 +965,10 @@ def capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, tp, tm):
 # =============================================================================
 # Relaxation Parameters (very conservative for spectral stability)
 # =============================================================================
-ETA_W = 0.15  # Wage relaxation parameter
-ETA_R = 0.15  # Interest rate relaxation parameter
+ETA_W = 0.20  # Wage relaxation parameter
+ETA_R = 0.25  # Interest rate relaxation parameter (more aggressive)
 W_MIN, W_MAX = 0.1, 5.0  # Tighter bounds
-R_MIN = -0.15  # Allow more negative rates for pre-reform equilibrium
+R_MIN = -0.30  # Allow much more negative rates for pre-reform equilibrium
 R_MAX = 0.06   # Tighter upper bound (realistic interest rates)
 
 # Bisection to find market-clearing price (then relax separately)
@@ -1525,11 +1525,13 @@ def main():
     print("[STEP 1] Post-reform SS (Nested)")
     print("="*70)
     post = find_equilibrium_nested(params, distortions=False, diag_out=diagnostics, label="post")
-    
+
     print("\n" + "="*70)
     print("[STEP 2] Pre-reform SS (Nested)")
     print("="*70)
-    pre = find_equilibrium_nested(params, distortions=True, diag_out=diagnostics, label="pre")
+    # Use post-reform equilibrium values as initial guess for pre-reform
+    pre = find_equilibrium_nested(params, distortions=True, diag_out=diagnostics, label="pre",
+                                   w_init=post['w'], r_init=post['r'])
     
     # Transition
     print("\n" + "="*70)
