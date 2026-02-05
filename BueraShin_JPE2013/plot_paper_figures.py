@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import os
 import argparse
 
@@ -23,6 +24,14 @@ plt.rcParams.update({
     'savefig.dpi': 300,
     'savefig.bbox': 'tight'
 })
+
+# Model Parameters (match Buera & Shin calibration)
+ALPHA  = 0.33
+NU     = 0.21         # 1-nu = span of control
+DELTA  = 0.06
+LAMBDA = 1.35         # Collateral constraint
+TAU_PLUS = 0.57       # Tax distortion
+TAU_MINUS = -0.15     # Subsidy distortion
 
 def interpolate_policy(a_dense, a_grid, pol_idx, z_idx):
     """
@@ -58,6 +67,35 @@ def interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, pol_idx):
     
     return AA, ZZ, pol_dense
 
+def solve_occupational_choice(a, z, w, r, lam, delta, alpha, nu, tau=0.0):
+    """
+    Returns 1 if agent chooses to be an entrepreneur, 0 otherwise.
+    Replicates the logic of solve_firm_no_tau from the simulation.
+    """
+    z_eff = (1.0 - tau) * z
+    if z_eff <= 0: return 0.0
+    
+    rental = r + delta
+    span = 1.0 - nu
+    
+    # Closed-form optimal unconstrained k
+    aux1 = (alpha * span * z_eff) / max(rental, 1e-10)
+    aux2 = ((1.0 - alpha) * span * z_eff) / max(w, 1e-10)
+    exp1 = 1.0 - (1.0 - alpha) * span
+    exp2 = (1.0 - alpha) * span
+
+    k_uncon = (aux1 ** exp1 * aux2 ** exp2) ** (1.0 / nu)
+    k = min(k_uncon, lam * a)
+    
+    # Labor from FOC given k
+    l = (aux2 * (k ** (alpha * span))) ** (1.0 / exp1)
+    
+    # Output and Profit
+    y = z_eff * ((k ** alpha) * (l ** (1.0 - alpha))) ** span
+    profit = y - w * l - rental * k
+    
+    return 1.0 if profit > w else 0.0
+
 def plot_policy_functions(steady_states_path, outdir):
     if not os.path.exists(steady_states_path):
         print(f"File not found: {steady_states_path}")
@@ -66,62 +104,65 @@ def plot_policy_functions(steady_states_path, outdir):
     data = np.load(steady_states_path)
     a_grid = data['a_grid']
     z_grid = data['z_grid']
-    
+    n_z = len(z_grid)
+
     # Pre-Reform
     pre_polp = data['pre_polp']
-    
+
     # Post-Reform
     post_pol = data['post_pol']
-    
+
     # Setup dense grid for smoothing
     limit_a = 200.0
     a_dense = np.linspace(a_grid[0], limit_a, 1000)
-    
-    # Indices for High and Median ability
-    idx_high = len(z_grid) - 1
-    idx_med  = len(z_grid) // 2
-    z_high_val = z_grid[idx_high]
-    z_med_val  = z_grid[idx_med]
+
+    # Use meaningful percentiles: 50th (median), 75th, 90th, 99th (max)
+    # With equal-probability bins, index i corresponds to percentile ~ i/n_z
+    idx_p50 = n_z // 2                    # ~50th percentile
+    idx_p75 = int(0.75 * n_z)             # ~75th percentile
+    idx_p90 = int(0.90 * n_z)             # ~90th percentile
+    idx_p99 = n_z - 1                     # ~99th percentile (max in grid)
+
+    z_p50 = z_grid[idx_p50]
+    z_p75 = z_grid[idx_p75]
+    z_p90 = z_grid[idx_p90]
+    z_p99 = z_grid[idx_p99]
+
+    print(f"  z-grid: min={z_grid[0]:.3f}, max={z_grid[-1]:.3f}, n_z={n_z}")
+    print(f"  Selected percentiles: p50={z_p50:.2f}, p75={z_p75:.2f}, p90={z_p90:.2f}, p99={z_p99:.2f}")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
+    colors = ['#1F77B4', '#2CA02C', '#FF7F0E', '#D62728']
+    styles = ['--', '-.', '-', '-']
+    indices = [idx_p50, idx_p75, idx_p90, idx_p99]
+    labels = [f'p50 (z={z_p50:.2f})', f'p75 (z={z_p75:.2f})',
+              f'p90 (z={z_p90:.2f})', f'p99 (z={z_p99:.2f})']
+
     # --- Plot Pre-Reform ---
     ax = axes[0]
-    pol_high = interpolate_policy(a_dense, a_grid, pre_polp, idx_high)
-    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.2f})')
-    pol_med = interpolate_policy(a_dense, a_grid, pre_polp, idx_med)
-    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.2f})')
-    ax.plot(a_dense, a_dense, color='gray', linestyle=':', linewidth=2.0)
+    for idx, col, sty, lab in zip(indices, colors, styles, labels):
+        pol = interpolate_policy(a_dense, a_grid, pre_polp, idx)
+        ax.plot(a_dense, pol, color=col, linestyle=sty, label=lab, linewidth=2.0)
+    ax.plot(a_dense, a_dense, color='gray', linestyle=':', linewidth=1.5, label='45° line')
     ax.set_title("Pre-Reform Steady State")
     ax.set_xlabel(r"Current Assets $a$")
     ax.set_ylabel(r"Next Period Assets $a'$")
     ax.set_xlim(0, limit_a)
     ax.set_ylim(0, limit_a)
-    
-    mask_grid = a_grid <= limit_a
-    ag_sub = a_grid[mask_grid]
-    pol_high_raw = a_grid[pre_polp[mask_grid, idx_high]]
-    pol_med_raw = a_grid[pre_polp[mask_grid, idx_med]]
-    ax.scatter(ag_sub, pol_high_raw, s=10, color='#D62728', alpha=0.3, label='Grid Points')
-    ax.scatter(ag_sub, pol_med_raw, s=10, color='#1F77B4', alpha=0.3)
-    ax.legend(frameon=False, loc='upper left')
-    
+    ax.legend(frameon=False, loc='upper left', fontsize=11)
+
     # --- Plot Post-Reform ---
     ax = axes[1]
-    pol_high = interpolate_policy(a_dense, a_grid, post_pol, idx_high)
-    ax.plot(a_dense, pol_high, color='#D62728', linestyle='-', label=f'High z ({z_high_val:.2f})')
-    pol_med = interpolate_policy(a_dense, a_grid, post_pol, idx_med)
-    ax.plot(a_dense, pol_med, color='#1F77B4', linestyle='--', label=f'Median z ({z_med_val:.2f})')
-    pol_high_raw = a_grid[post_pol[mask_grid, idx_high]]
-    pol_med_raw = a_grid[post_pol[mask_grid, idx_med]]
-    ax.scatter(ag_sub, pol_high_raw, s=10, color='#D62728', alpha=0.3, label='Grid Points')
-    ax.scatter(ag_sub, pol_med_raw, s=10, color='#1F77B4', alpha=0.3)
-    ax.plot(a_dense, a_dense, color='gray', linestyle=':', linewidth=2.0)
+    for idx, col, sty, lab in zip(indices, colors, styles, labels):
+        pol = interpolate_policy(a_dense, a_grid, post_pol, idx)
+        ax.plot(a_dense, pol, color=col, linestyle=sty, label=lab, linewidth=2.0)
+    ax.plot(a_dense, a_dense, color='gray', linestyle=':', linewidth=1.5, label='45° line')
     ax.set_title("Post-Reform Steady State")
     ax.set_xlabel(r"Current Assets $a$")
     ax.set_xlim(0, limit_a)
     ax.set_ylim(0, limit_a)
-    ax.legend(frameon=False, loc='upper left')
+    ax.legend(frameon=False, loc='upper left', fontsize=11)
 
     for ax in axes:
         ax.spines['right'].set_visible(False)
@@ -326,35 +367,53 @@ def plot_ability_distribution(steady_states_path, outdir):
 
     data = np.load(steady_states_path)
     z_grid = data['z_grid']
-    
-    # Re-calculate prob_z based on the same logic as the main script
-    # Pareto PDF: f(z) = eta * z^(-eta-1)
-    eta = 4.15
-    pdf = eta * (z_grid ** (-eta - 1))
-    
-    # Normalize to show relative mass
-    pdf_norm = pdf / np.sum(pdf)
+    n_z = len(z_grid)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    ax.bar(z_grid, pdf_norm, width=0.02, color='#1F77B4', alpha=0.7, label='Grid Point Probability Mass')
-    ax.plot(z_grid, pdf_norm, color='#D62728', marker='o', markersize=4, linestyle='--', linewidth=1, label='PDF Trend')
-    
-    ax.set_title("Ability Distribution (z-grid)")
+    # The grid uses equal-probability bins, so each z has equal prob mass = 1/n_z
+    prob_z = np.ones(n_z) / n_z
+
+    # Also compute the theoretical Pareto PDF for comparison
+    eta = 4.15
+    z_dense = np.linspace(z_grid[0], z_grid[-1], 500)
+    pdf_pareto = eta * (z_dense ** (-eta - 1))
+    # Normalize to integrate to 1 over the shown range
+    dz = z_dense[1] - z_dense[0]
+    pdf_pareto = pdf_pareto / (np.sum(pdf_pareto) * dz)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # --- Left: Grid point locations with equal probability ---
+    ax = axes[0]
+    ax.stem(z_grid, prob_z, linefmt='#1F77B4', markerfmt='o', basefmt=' ')
+    ax.set_title(f"Ability Grid Points (n={n_z}, equal probability)")
     ax.set_xlabel("Ability $z$")
     ax.set_ylabel("Probability Mass")
+    ax.set_xlim(z_grid[0] - 0.05, z_grid[-1] + 0.1)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.axhline(1/n_z, color='gray', linestyle='--', alpha=0.5, label=f'Equal mass = 1/{n_z}')
+    ax.legend(frameon=False)
+
+    # --- Right: Grid density vs Pareto PDF ---
+    ax = axes[1]
+    # Show how grid points are distributed: histogram of z values
+    ax.hist(z_grid, bins=30, density=True, color='#1F77B4', alpha=0.6, label='Grid point density')
+    ax.plot(z_dense, pdf_pareto, color='#D62728', linewidth=2, label=f'Pareto PDF ($\\eta$={eta})')
+    ax.set_title("Grid Density vs Pareto Distribution")
+    ax.set_xlabel("Ability $z$")
+    ax.set_ylabel("Density")
     ax.legend(frameon=False)
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
-    ax.grid(True, linestyle=':', alpha=0.3)
-    
+    ax.set_xlim(z_grid[0] - 0.05, z_grid[-1] + 0.1)
+
     plt.tight_layout()
     save_path = os.path.join(outdir, "fig_ability_distribution.png")
     plt.savefig(save_path)
     plt.close()
     print(f"Generated: {save_path}")
 
-def plot_policy_functions_3d(steady_states_path, outdir):
+def plot_asset_policy_contour(steady_states_path, outdir):
     if not os.path.exists(steady_states_path):
         print(f"File not found: {steady_states_path}")
         return
@@ -362,38 +421,159 @@ def plot_policy_functions_3d(steady_states_path, outdir):
     data = np.load(steady_states_path)
     a_grid = data['a_grid']
     z_grid = data['z_grid']
-    post_pol = data['post_pol']  # shape (n_a, n_z)
-    
-    # Create dense grid specifically for 3D visualization
-    limit_a = 50.0  # Focused on the most active part of the distribution
-    a_dense = np.linspace(a_grid[0], limit_a, 40)
-    z_dense = np.linspace(z_grid[0], z_grid[-1], 30)
-    
-    AA, ZZ, pol_dense = interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, post_pol)
+    post_pol = data['post_pol']
+    pre_polp = data['pre_polp']  # Taxed type
 
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # Plot surface
-    surf = ax.plot_surface(AA, ZZ, pol_dense, cmap='viridis', edgecolor='none', alpha=0.8)
-    
-    # Add wireframe for better perspective
-    ax.plot_wireframe(AA, ZZ, pol_dense, color='black', linewidth=0.3, alpha=0.3)
-    
-    # Set labels
-    ax.set_xlabel(r"Current Assets $a$")
-    ax.set_ylabel(r"Ability $z$")
-    ax.set_zlabel(r"Next Period Assets $a'$")
-    ax.set_title("Post-Reform Asset Policy Function $a'(a, z)$")
-    
-    # Colorbar
-    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label="Next Period Assets")
-    
-    # Improve view angle
-    ax.view_init(elev=25, azim=-125)
-    
-    save_path = os.path.join(outdir, "fig_policy_3d.png")
+    n_z = len(z_grid)
+    print(f"  Contour plot: z_grid range [{z_grid[0]:.2f}, {z_grid[-1]:.2f}], n_z={n_z}")
+
+    # Create dense grid for smooth contours
+    limit_a = 150.0
+    a_dense = np.linspace(a_grid[0], limit_a, 150)
+    z_dense = np.linspace(z_grid[0], z_grid[-1], 150)
+
+    # Interpolate both surfaces
+    AA_pre, ZZ_pre, pol_pre = interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, pre_polp)
+    AA_post, ZZ_post, pol_post = interpolate_policy_2d(a_dense, z_dense, a_grid, z_grid, post_pol)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    levels = np.linspace(0, limit_a, 25)
+
+    # --- Plot 1: Pre-Reform ---
+    ax = axes[0]
+    cf1 = ax.contourf(AA_pre, ZZ_pre, pol_pre, levels=levels, cmap='viridis')
+    ax.contour(AA_pre, ZZ_pre, pol_pre, levels=levels[::2], colors='white', linewidths=0.4, alpha=0.4)
+    ax.set_title("Pre-Reform: $a'(a, z)$ (Taxed)", fontsize=14)
+    cbar1 = fig.colorbar(cf1, ax=ax, shrink=0.85)
+    cbar1.set_label("$a'$", fontsize=12)
+
+    # --- Plot 2: Post-Reform ---
+    ax = axes[1]
+    cf2 = ax.contourf(AA_post, ZZ_post, pol_post, levels=levels, cmap='viridis')
+    ax.contour(AA_post, ZZ_post, pol_post, levels=levels[::2], colors='white', linewidths=0.4, alpha=0.4)
+    ax.set_title("Post-Reform: $a'(a, z)$ (Undistorted)", fontsize=14)
+    cbar2 = fig.colorbar(cf2, ax=ax, shrink=0.85)
+    cbar2.set_label("$a'$", fontsize=12)
+
+    for ax in axes:
+        ax.set_xlabel("Current Assets $a$", fontsize=12)
+        ax.set_ylabel("Ability $z$", fontsize=12)
+        # Mark key percentile lines on z-axis
+        for pct, ls in [(0.5, '--'), (0.75, ':'), (0.9, '-.')]:
+            z_pct = z_grid[int(pct * n_z)]
+            ax.axhline(z_pct, color='white', linestyle=ls, linewidth=0.8, alpha=0.6)
+
+    plt.suptitle(f"Asset Savings Policy $a'(a,z)$ — z-grid: [{z_grid[0]:.2f}, {z_grid[-1]:.2f}]",
+                 fontsize=16, y=0.98)
+    plt.tight_layout()
+
+    save_path = os.path.join(outdir, "fig_asset_policy_contour.png")
     plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"Generated: {save_path}")
+
+def plot_occupational_choice_contour(steady_states_path, outdir):
+    if not os.path.exists(steady_states_path):
+        print(f"File not found: {steady_states_path}")
+        return
+
+    data = np.load(steady_states_path)
+    a_grid = data['a_grid']
+    z_grid = data['z_grid']
+    
+    # Prices
+    post_w, post_r = data['post_w'], data['post_r']
+    pre_w, pre_r = data['pre_w'], data['pre_r']
+    
+    # Create dense grid
+    limit_a = 50.0 
+    a_dense = np.linspace(a_grid[0], limit_a, 200)
+    z_dense = np.linspace(z_grid[0], z_grid[-1], 200)
+    AA, ZZ = np.meshgrid(a_dense, z_dense, indexing='ij')
+
+    # Compute choices
+    OCC_post = np.zeros(AA.shape)
+    OCC_pre_plus = np.zeros(AA.shape)
+    OCC_pre_minus = np.zeros(AA.shape)
+    
+    for i in range(len(a_dense)):
+        for j in range(len(z_dense)):
+            OCC_post[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], post_w, post_r, LAMBDA, DELTA, ALPHA, NU, tau=0.0)
+            OCC_pre_plus[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], pre_w, pre_r, LAMBDA, DELTA, ALPHA, NU, tau=TAU_PLUS)
+            OCC_pre_minus[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], pre_w, pre_r, LAMBDA, DELTA, ALPHA, NU, tau=TAU_MINUS)
+
+    # Pre-reform aggregate choice for shading: 
+    # 0 = Worker for both
+    # 1 = Entre for subsidized only (Sensitive zone)
+    # 2 = Entre for both
+    OCC_pre_agg = OCC_pre_plus + OCC_pre_minus
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 9))
+    
+    # Precise Color Palette
+    color_worker = '#F8F9F9'  # Very Light Gray
+    color_entre  = '#FEEBEE'  # Soft Peach/Red
+    color_zone   = '#E3F2FD'  # Soft Sky Blue
+
+    # Create handles for the legend
+    patch_worker = mpatches.Patch(color=color_worker, label='Always Worker')
+    patch_zone   = mpatches.Patch(color=color_zone, label='Dependent on distortion draw')
+    patch_entre  = mpatches.Patch(color=color_entre, label='Always Entrepreneur')
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 10))
+    
+    # --- Plot 1: Pre-Reform ---
+    ax = axes[0]
+    ax.contourf(AA, ZZ, OCC_pre_agg, levels=[-0.5, 0.5, 1.5, 2.5], colors=[color_worker, color_zone, color_entre])
+    
+    l1 = ax.contour(AA, ZZ, OCC_pre_plus, levels=[0.5], colors='#D32F2F', linewidths=3.5)
+    l3 = ax.contour(AA, ZZ, OCC_pre_minus, levels=[0.5], colors='#388E3C', linewidths=3.5)
+    
+    ax.set_title("Pre-Reform Choice Boundary", fontsize=20, fontweight='bold', pad=20)
+    
+    # --- Plot 2: Post-Reform ---
+    ax = axes[1]
+    ax.contourf(AA, ZZ, OCC_post, levels=[-0.5, 0.5, 1.5], colors=[color_worker, color_entre])
+    l_post = ax.contour(AA, ZZ, OCC_post, levels=[0.5], colors='black', linewidths=3.5)
+    ax.set_title("Post-Reform Choice Boundary", fontsize=20, fontweight='bold', pad=20)
+    
+    # Common Formatting
+    for ax in axes:
+        ax.set_xlabel("Assets $a$", fontsize=16)
+        ax.set_ylabel("Ability $z$", fontsize=16)
+        ax.grid(True, linestyle=':', alpha=0.5)
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+        ax.set_xlim(0, limit_a)
+        ax.set_ylim(z_grid[0], z_grid[-1])
+        ax.tick_params(axis='both', which='major', labelsize=12)
+
+    # Create a Unified Legend at the bottom
+    h1, _ = l1.legend_elements(); h3, _ = l3.legend_elements(); hp, _ = l_post.legend_elements()
+    
+    handles = [
+        h1[0], h3[0], hp[0],
+        patch_worker, patch_zone, patch_entre
+    ]
+    labels = [
+        f'Threshold (Taxed $\\tau={TAU_PLUS}$)',
+        f'Threshold (Subsidized $\\tau={TAU_MINUS}$)',
+        'Unified Entry Threshold',
+        'Always Worker Region',
+        'Dependent on distortion draw',
+        'Always Entrepreneur Region'
+    ]
+    
+    fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=16, 
+               frameon=True, facecolor='white', framealpha=1.0, shadow=True,
+               bbox_to_anchor=(0.5, -0.05))
+
+    plt.suptitle("Impact of Distortions on Occupational Choice", fontsize=26, fontweight='bold', y=1.05)
+    plt.tight_layout()
+    
+    save_path = os.path.join(outdir, "fig_occupational_contour.png")
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -411,7 +591,8 @@ def main():
     plot_wealth_distribution(steady_path, args.out)
     plot_transition_dynamics(trans_path, args.out)
     plot_ability_distribution(steady_path, args.out)
-    plot_policy_functions_3d(steady_path, args.out)
+    plot_asset_policy_contour(steady_path, args.out)
+    plot_occupational_choice_contour(steady_path, args.out)
 
 if __name__ == "__main__":
     main()

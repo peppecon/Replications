@@ -51,10 +51,10 @@ TAU_PLUS = 0.57      # Tax rate (positive wedge)
 TAU_MINUS = -0.15    # Subsidy rate (negative wedge)
 Q_DIST = 1.55        # Correlation: Pr(tau=tau_plus|e) = 1 - exp(-q*e)
 
-# Global Grid Bounds (Spectral)
+# Global Grid Bounds (Spectral) - matching main_cheb.py
 A_MIN, A_MAX = 1e-6, 4000.0
 A_SHIFT = 1.0
-Z_MIN, Z_MAX = 1.0, (1 - 0.9995)**(-1/4.15)
+Z_MIN, Z_MAX = (1 - 0.001)**(-1/ETA), (1 - 0.9995)**(-1/ETA)  # Match main_cheb.py
 N_CHEBY_A = 20
 N_CHEBY_Z = 20
 MAX_ITER_POLICY = 100  # Spectral policy solver max iterations
@@ -965,11 +965,11 @@ def capital_excess_with_dist(r, w, mu_p, mu_m, a_h, z_h, params, tp, tm):
 # =============================================================================
 # Relaxation Parameters (very conservative for spectral stability)
 # =============================================================================
-ETA_W = 0.20  # Wage relaxation parameter
-ETA_R = 0.25  # Interest rate relaxation parameter (more aggressive)
-W_MIN, W_MAX = 0.1, 5.0  # Tighter bounds
-R_MIN = -0.30  # Allow much more negative rates for pre-reform equilibrium
-R_MAX = 0.06   # Tighter upper bound (realistic interest rates)
+ETA_W = 0.30  # Wage relaxation parameter
+ETA_R = 0.20  # Interest rate relaxation parameter
+W_MIN, W_MAX = 0.1, 5.0  # Wage bounds
+R_MIN = -0.10  # Allow moderately negative rates
+R_MAX = 0.08   # Upper bound for interest rate
 
 # Bisection to find market-clearing price (then relax separately)
 def _bisect_root(func, lo, hi, max_it=28, tol_x=1e-10):
@@ -1174,12 +1174,13 @@ def find_equilibrium_nested(params, distortions=False, diag_out=None, label="pos
     """
     delta, alpha, nu, lam, beta, sigma, psi = params
 
-    # Grid setup
+    # Grid setup (matching main_cheb.py - start M at 0.0001)
     na_h = 600; nz_h = 40
     a_h = np.exp(np.linspace(np.log(A_MIN+A_SHIFT), np.log(A_MAX+A_SHIFT), na_h)) - A_SHIFT
-    M_v = np.concatenate([np.linspace(0.0, 0.998, 38), [0.999, 0.9995]])
+    M_v = np.concatenate([np.linspace(0.0001, 0.998, 38), [0.999, 0.9995]])
     z_h = (1 - M_v)**(-1/ETA)
-    pr_z = np.zeros(nz_h); pr_z[0] = M_v[0]; pr_z[1:] = M_v[1:] - M_v[:-1]; pr_z /= pr_z.sum()
+    pr_z = np.zeros(nz_h); pr_z[0] = M_v[0]; pr_z[1:] = M_v[1:] - M_v[:-1]
+    pr_z /= pr_z.sum()
     prob_tp = 1 - np.exp(-Q_DIST * z_h)
 
     # Spectral nodes and matrices

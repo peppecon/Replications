@@ -743,6 +743,107 @@ def aggregates_mu_dist(mu_p, mu_m, A, a_grid, z_grid, w, r, lam, delta, alpha, n
                     s_e += wt_m
     return K, L, Y, s_e
 
+@njit(cache=False)
+def avg_entrepreneurial_ability_mu(mu, a_grid, z_grid, w, r, lam, delta, alpha, nu):
+    """
+    Computes the average entrepreneurial ability among active entrepreneurs.
+    Returns: (avg_z_entre, share_entre)
+    """
+    wage = w if w > 1e-12 else 1e-12
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+    sum_z = 0.0
+    sum_wt = 0.0
+    for ia in range(n_a):
+        a = a_grid[ia]
+        for iz in range(n_z):
+            wt = mu[ia, iz]
+            if wt <= 0.0:
+                continue
+            z = z_grid[iz]
+            p, _, _, _ = solve_firm_no_tau(a, z, w, r, lam, delta, alpha, nu)
+            if p > wage:
+                sum_z += wt * z
+                sum_wt += wt
+    if sum_wt > 1e-12:
+        return sum_z / sum_wt, sum_wt
+    return 0.0, 0.0
+
+@njit(cache=False)
+def wealth_share_top5_ability_mu(mu, a_grid, z_grid, top5_threshold_idx):
+    """
+    Computes the wealth share held by agents in the top 5% of the ability distribution.
+    top5_threshold_idx: index such that agents with iz >= top5_threshold_idx are in top 5%.
+    """
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+    total_wealth = 0.0
+    top5_wealth = 0.0
+    for ia in range(n_a):
+        a = a_grid[ia]
+        for iz in range(n_z):
+            wt = mu[ia, iz]
+            if wt <= 0.0:
+                continue
+            total_wealth += wt * a
+            if iz >= top5_threshold_idx:
+                top5_wealth += wt * a
+    if total_wealth > 1e-12:
+        return top5_wealth / total_wealth
+    return 0.0
+
+@njit(cache=False)
+def avg_entrepreneurial_ability_mu_dist(mu_p, mu_m, a_grid, z_grid, w, r, lam, delta, alpha, nu, tau_p, tau_m):
+    """
+    Computes average entrepreneurial ability among active entrepreneurs in distorted economy.
+    """
+    wage = w if w > 1e-12 else 1e-12
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+    sum_z = 0.0
+    sum_wt = 0.0
+    for ia in range(n_a):
+        a = a_grid[ia]
+        for iz in range(n_z):
+            z = z_grid[iz]
+            wt_p = mu_p[ia, iz]
+            if wt_p > 0.0:
+                p, _, _, _ = solve_firm_with_tau(a, z, tau_p, w, r, lam, delta, alpha, nu)
+                if p > wage:
+                    sum_z += wt_p * z
+                    sum_wt += wt_p
+            wt_m = mu_m[ia, iz]
+            if wt_m > 0.0:
+                p, _, _, _ = solve_firm_with_tau(a, z, tau_m, w, r, lam, delta, alpha, nu)
+                if p > wage:
+                    sum_z += wt_m * z
+                    sum_wt += wt_m
+    if sum_wt > 1e-12:
+        return sum_z / sum_wt, sum_wt
+    return 0.0, 0.0
+
+@njit(cache=False)
+def wealth_share_top5_ability_mu_dist(mu_p, mu_m, a_grid, z_grid, top5_threshold_idx):
+    """
+    Computes wealth share held by agents in top 5% of ability in distorted economy.
+    """
+    n_a = len(a_grid)
+    n_z = len(z_grid)
+    total_wealth = 0.0
+    top5_wealth = 0.0
+    for ia in range(n_a):
+        a = a_grid[ia]
+        for iz in range(n_z):
+            wt = mu_p[ia, iz] + mu_m[ia, iz]
+            if wt <= 0.0:
+                continue
+            total_wealth += wt * a
+            if iz >= top5_threshold_idx:
+                top5_wealth += wt * a
+    if total_wealth > 1e-12:
+        return top5_wealth / total_wealth
+    return 0.0
+
 # =============================================================================
 # Robust root solves (Python wrappers calling fast Numba ED functions)
 # =============================================================================
@@ -767,11 +868,14 @@ def _bisect_root(func, lo, hi, max_it=MAX_BISECT_IT, tol_x=1e-10):
             f_lo = f_mid
     return 0.5 * (lo + hi)
 
-def solve_w_clear_mu_nodist(mu_t, a_grid, z_grid, r_t, w_guess):
+def solve_w_clear_mu_nodist(mu_t, a_grid, z_grid, r_t, w_guess, lam=None):
+    """Solve for wage that clears labor market. Uses lam if provided, else LAMBDA."""
+    if lam is None:
+        lam = LAMBDA
     w_guess = float(np.clip(w_guess, W_MIN, W_MAX))
 
     def f(w):
-        return float(labor_excess_mu_nodist(mu_t, a_grid, z_grid, w, r_t, LAMBDA, DELTA, ALPHA, NU))
+        return float(labor_excess_mu_nodist(mu_t, a_grid, z_grid, w, r_t, lam, DELTA, ALPHA, NU))
 
     # quick check
     f0 = f(w_guess)
@@ -804,11 +908,14 @@ def solve_w_clear_mu_nodist(mu_t, a_grid, z_grid, r_t, w_guess):
     j = int(np.argmin(np.abs(vals)))
     return float(grid[j])
 
-def solve_r_clear_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r_guess):
+def solve_r_clear_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r_guess, lam=None):
+    """Solve for interest rate that clears capital market. Uses lam if provided, else LAMBDA."""
+    if lam is None:
+        lam = LAMBDA
     r_guess = float(np.clip(r_guess, R_MIN, R_MAX))
 
     def f(r):
-        return float(capital_excess_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r, LAMBDA, DELTA, ALPHA, NU))
+        return float(capital_excess_mu_nodist(mu_t, A_t, a_grid, z_grid, w_t, r, lam, DELTA, ALPHA, NU))
 
     f0 = f(r_guess)
     if abs(f0) < 1e-10:
@@ -976,10 +1083,17 @@ def steady_state_post(a_grid, z_grid, prob_z, N, burn, seed=42, verbose=True):
     Ls = 1.0 - s_e
     TFP = Y / max(((K ** ALPHA) * (Ls ** (1.0 - ALPHA))) ** span, 1e-12)
 
+    # Micro metrics
+    n_z = len(z_grid)
+    top5_idx = int(0.95 * n_z)
+    avg_z, _ = avg_entrepreneurial_ability_mu(mu, a_grid, z_grid, w, r, LAMBDA, DELTA, ALPHA, NU)
+    ws_top5 = wealth_share_top5_ability_mu(mu, a_grid, z_grid, top5_idx)
+
     if verbose and top_mass > 1e-3:
         print(f"WARNING: mass at top asset bin is {top_mass:.3e}. Consider increasing --amax or --na.\n")
 
-    return dict(w=w, r=r, V=V, pol=pol, mu=mu.copy(), A=A, Y=Y, K=K, L=L, s_e=s_e, TFP=TFP)
+    return dict(w=w, r=r, V=V, pol=pol, mu=mu.copy(), A=A, Y=Y, K=K, L=L, s_e=s_e, TFP=TFP,
+                avg_z_entre=avg_z, wealth_share_top5=ws_top5)
 
 def steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N, burn, seed=77, verbose=True):
     """
@@ -1067,17 +1181,25 @@ def steady_state_pre(a_grid, z_grid, prob_z, prob_tau_plus, N, burn, seed=77, ve
     Ls = 1.0 - s_e
     TFP = Y / max(((K ** ALPHA) * (Ls ** (1.0 - ALPHA))) ** span, 1e-12)
 
+    # Micro metrics
+    n_z = len(z_grid)
+    top5_idx = int(0.95 * n_z)
+    avg_z, _ = avg_entrepreneurial_ability_mu_dist(mu_p, mu_m, a_grid, z_grid, w, r,
+                                                    LAMBDA, DELTA, ALPHA, NU, TAU_PLUS, TAU_MINUS)
+    ws_top5 = wealth_share_top5_ability_mu_dist(mu_p, mu_m, a_grid, z_grid, top5_idx)
+
     # Also return a sample cross-section for transition initial condition (a,z)
     # Use the last simulated (a,z) from the last iteration:
     return dict(w=w, r=r, a=a.copy(), z=z.copy(),
                 Vp=Vp, Vm=Vm, polp=polp, polm=polm,
                 mu_p=mu_p.copy(), mu_m=mu_m.copy(), A=A,
-                Y=Y, K=K, L=L, s_e=s_e, TFP=TFP)
+                Y=Y, K=K, L=L, s_e=s_e, TFP=TFP,
+                avg_z_entre=avg_z, wealth_share_top5=ws_top5)
 
 # =============================================================================
 # Transition path solver (Algorithm B.2)
 # =============================================================================
-def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026, verbose=True):
+def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026, verbose=True, lam=None):
     """
     Implements Appendix Algorithm B.2:
       outer loop on r_path
@@ -1089,8 +1211,15 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
         per-period capital clearing -> iota_t
         relax update r_path
     Terminal condition: w_T = w_post, r_T = r_post, V_T = V_post.
+
+    lam: collateral constraint parameter. If None, uses LAMBDA. Set to large value (e.g., 1e6) for neoclassical.
     """
+    if lam is None:
+        lam = LAMBDA
     n_a, n_z = len(a_grid), len(z_grid)
+
+    # Index for top 5% ability (95th percentile)
+    top5_idx = int(0.95 * n_z)
 
     # fixed shocks (common random numbers)
     resets, shocks = generate_shocks(N, T, PSI, prob_z, seed=seed)
@@ -1129,7 +1258,7 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
 
             for tt in range(T-1, -1, -1):
                 inc_t = precompute_income_no_dist(a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                                  LAMBDA, DELTA, ALPHA, NU)
+                                                  lam, DELTA, ALPHA, NU)
                 V_t, pol_t = bellman_one_step(V_next, a_grid, z_grid, prob_z, inc_t,
                                               BETA, SIGMA, PSI)
                 pol_idx_path[tt] = pol_t
@@ -1156,7 +1285,7 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
             # warm start sequentially (w is smooth)
             wg = float(w_path[0])
             for tt in range(T):
-                wg = solve_w_clear_mu_nodist(mu_path[tt], a_grid, z_grid, float(r_path[tt]), wg)
+                wg = solve_w_clear_mu_nodist(mu_path[tt], a_grid, z_grid, float(r_path[tt]), wg, lam=lam)
                 w_clear[tt] = wg
 
             # relax update (do not touch terminal)
@@ -1176,7 +1305,7 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
         r_clear = np.empty(T, dtype=np.float64)
         rg = float(r_path[0])
         for tt in range(T):
-            rg = solve_r_clear_mu_nodist(mu_path[tt], float(A_path[tt]), a_grid, z_grid, float(w_path[tt]), rg)
+            rg = solve_r_clear_mu_nodist(mu_path[tt], float(A_path[tt]), a_grid, z_grid, float(w_path[tt]), rg, lam=lam)
             r_clear[tt] = rg
 
         # relax update
@@ -1201,10 +1330,10 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
             max_edK = 0.0
             for tt in range(T):
                 edL = abs(float(labor_excess_mu_nodist(mu_path[tt], a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                                     LAMBDA, DELTA, ALPHA, NU)))
+                                                     lam, DELTA, ALPHA, NU)))
                 edK = abs(float(capital_excess_mu_nodist(mu_path[tt], float(A_path[tt]), a_grid, z_grid,
                                                        float(w_path[tt]), float(r_path[tt]),
-                                                       LAMBDA, DELTA, ALPHA, NU)))
+                                                       lam, DELTA, ALPHA, NU)))
                 if edL > max_edL:
                     max_edL = edL
                 if edK > max_edK:
@@ -1223,7 +1352,7 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
     V_next = V_T.copy()
     for tt in range(T-1, -1, -1):
         inc_t = precompute_income_no_dist(a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                          LAMBDA, DELTA, ALPHA, NU)
+                                          lam, DELTA, ALPHA, NU)
         V_t, pol_t = bellman_one_step(V_next, a_grid, z_grid, prob_z, inc_t, BETA, SIGMA, PSI)
         pol_idx_path[tt] = pol_t
         V_next = V_t
@@ -1249,12 +1378,14 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
     TFP = np.empty(T, dtype=np.float64)
     ED_L = np.empty(T, dtype=np.float64)
     ED_K = np.empty(T, dtype=np.float64)
+    avg_z_entre = np.empty(T, dtype=np.float64)
+    wealth_share_top5 = np.empty(T, dtype=np.float64)
 
     span = 1.0 - NU
     for tt in range(T):
         Kt, Lt, Yt, se = aggregates_mu_nodist(mu_path_final[tt], float(A_path_final[tt]),
                                              a_grid, z_grid, float(w_path[tt]), float(r_path[tt]),
-                                             LAMBDA, DELTA, ALPHA, NU)
+                                             lam, DELTA, ALPHA, NU)
         Y[tt] = Yt
         K[tt] = Kt
         L[tt] = Lt
@@ -1264,9 +1395,17 @@ def solve_transition_B2(pre_eq, post_eq, a_grid, z_grid, prob_z, T, N, seed=2026
         ED_L[tt] = Lt - Ls
         ED_K[tt] = Kt - A_path_final[tt]
 
+        # New metrics: average entrepreneurial ability and wealth share of top 5% ability
+        avg_z, _ = avg_entrepreneurial_ability_mu(mu_path_final[tt], a_grid, z_grid,
+                                                   float(w_path[tt]), float(r_path[tt]),
+                                                   lam, DELTA, ALPHA, NU)
+        avg_z_entre[tt] = avg_z
+        wealth_share_top5[tt] = wealth_share_top5_ability_mu(mu_path_final[tt], a_grid, z_grid, top5_idx)
+
     return dict(t=np.arange(T+1), w=w_path, r=r_path,
                 Y=Y, K=K, L=L, A=A_path_final, s_e=s_e, TFP=TFP,
-                ED_L=ED_L, ED_K=ED_K)
+                ED_L=ED_L, ED_K=ED_K,
+                avg_z_entre=avg_z_entre, wealth_share_top5=wealth_share_top5)
 
 # =============================================================================
 # Data Saving
@@ -1329,13 +1468,13 @@ def save_steady_states(pre_eq, post_eq, a_grid, z_grid, outdir):
                         )
     print(f"Saved steady state results to: {path}")
 
-def save_transition_path(trans, pre_eq, post_eq, outdir):
+def save_transition_path(trans, pre_eq, post_eq, outdir, filename="transition_path.npz"):
     """
     Saves transition path simulation results.
     """
     os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "transition_path.npz")
-    
+    path = os.path.join(outdir, filename)
+
     np.savez_compressed(path,
                         t=trans['t'],
                         Y=trans['Y'],
@@ -1346,6 +1485,9 @@ def save_transition_path(trans, pre_eq, post_eq, outdir):
                         r=trans['r'],
                         ED_L=trans['ED_L'],
                         ED_K=trans['ED_K'],
+                        # New metrics
+                        avg_z_entre=trans.get('avg_z_entre', np.array([])),
+                        wealth_share_top5=trans.get('wealth_share_top5', np.array([])),
                         # Save pre-SS levels for normalization
                         pre_Y=pre_eq['Y'],
                         pre_K=pre_eq['K'],
@@ -1353,6 +1495,8 @@ def save_transition_path(trans, pre_eq, post_eq, outdir):
                         pre_TFP=pre_eq['TFP'],
                         pre_w=pre_eq['w'],
                         pre_r=pre_eq['r'],
+                        pre_avg_z_entre=pre_eq.get('avg_z_entre', 0.0),
+                        pre_wealth_share_top5=pre_eq.get('wealth_share_top5', 0.0),
                         )
     print(f"Saved transition path results to: {path}")
 
@@ -1374,7 +1518,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     print("Building grids...")
-    z_grid, prob_z = create_ability_grid_paper(ETA, zmax_target=3.5)
+    z_grid, prob_z = create_ability_grid_paper(ETA, zmax_target=6.5)
     a_grid = create_asset_grid(args.na, 1e-10, args.amax, power=2.0)
     prob_tau_plus = compute_tau_probs(z_grid, Q_DIST)
 
