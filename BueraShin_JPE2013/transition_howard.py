@@ -67,12 +67,12 @@ ETA_W = 0.35
 ETA_R = 0.20
 
 # Convergence tolerances (sequence sup norms)
-TOL_W_SEQ = 2e-4
-TOL_R_SEQ = 2e-4
+TOL_W_SEQ = 2e-5
+TOL_R_SEQ = 2e-5
 
 # How hard we enforce market clearing at the end of the algorithm
-TOL_ED_L = 2e-3
-TOL_ED_K = 2e-3
+TOL_ED_L = 2e-4
+TOL_ED_K = 2e-4
 
 MAX_W_INNER = 30    # inner iterations on wage path given r path
 MAX_OUTER   = 30    # outer iterations on interest rate path
@@ -92,8 +92,8 @@ R_MAX = (1.0 / BETA) - 1.0 - 1e-6
 # =============================================================================
 def create_ability_grid_paper(
     eta: float,
-    n_z: int = 60,
-    zmax_target: float = 4.5,   # set None if you want to pick umax directly
+    n_z: int = 200,
+    zmax_target: float = 6.5,   # set None if you want to pick umax directly
     umax: float = 0.995,  # e.g. 0.995
 ):
     """
@@ -1536,16 +1536,41 @@ def main():
     # Save steady states immediately as requested
     save_steady_states(pre, post, a_grid, z_grid, args.out)
 
-    print("STEP 3: Transition path via Appendix Algorithm B.2 (reform at t=0)")
-    trans = solve_transition_B2(pre, post, a_grid, z_grid, prob_z, T=args.T, N=args.N, verbose=verbose)
+    print("STEP 3: Transition path via Appendix Algorithm B.2 (reform at t=0, λ=1.35)")
+    trans = solve_transition_B2(pre, post, a_grid, z_grid, prob_z, T=args.T, N=args.N, verbose=verbose, lam=LAMBDA)
 
     # final diagnostics
     max_edL = float(np.max(np.abs(trans["ED_L"])))
     max_edK = float(np.max(np.abs(trans["ED_K"])))
-    print(f"Transition diagnostics: max|ED_L|={max_edL:.3e}, max|ED_K|={max_edK:.3e}")
+    print(f"Transition diagnostics (λ=1.35): max|ED_L|={max_edL:.3e}, max|ED_K|={max_edK:.3e}")
 
     # Save transition results
-    save_transition_path(trans, pre, post, args.out)
+    save_transition_path(trans, pre, post, args.out, filename="transition_path.npz")
+
+    # =========================================================================
+    # STEP 4: Neoclassical benchmark (λ = ∞, i.e., perfect credit markets)
+    # =========================================================================
+    print("\nSTEP 4: Neoclassical transition (λ=∞, perfect credit markets)")
+    LAM_NEOCLASSICAL = 1e6  # Very large λ effectively removes collateral constraint
+
+    # Need separate steady states for neoclassical case
+    print("  Computing neoclassical post-reform steady state...")
+    post_nc = steady_state_post(a_grid, z_grid, prob_z, N=args.N, burn=args.burn, verbose=False)
+    print(f"  Neoclassical Post SS: w={post_nc['w']:.6f}, r={post_nc['r']:.6f}")
+
+    # For neoclassical pre-reform, use same initial distribution but different terminal
+    print("  Computing neoclassical transition...")
+    trans_nc = solve_transition_B2(pre, post_nc, a_grid, z_grid, prob_z,
+                                    T=args.T, N=args.N, verbose=verbose, lam=LAM_NEOCLASSICAL)
+
+    max_edL_nc = float(np.max(np.abs(trans_nc["ED_L"])))
+    max_edK_nc = float(np.max(np.abs(trans_nc["ED_K"])))
+    print(f"Neoclassical diagnostics: max|ED_L|={max_edL_nc:.3e}, max|ED_K|={max_edK_nc:.3e}")
+
+    # Save neoclassical transition
+    save_transition_path(trans_nc, pre, post_nc, args.out, filename="transition_neoclassical.npz")
+
+    print("\nAll results saved to:", args.out)
 
 if __name__ == "__main__":
     main()

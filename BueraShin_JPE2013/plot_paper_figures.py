@@ -174,38 +174,31 @@ def plot_policy_functions(steady_states_path, outdir):
     plt.close()
     print(f"Generated: {save_path}")
 
-def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
-    if not os.path.exists(transition_path):
-        print(f"File not found: {transition_path}")
-        return
+def load_transition_data(filepath, tmin, tmax):
+    """Helper to load and prepare transition data for plotting."""
+    if not os.path.exists(filepath):
+        return None
 
-    data = np.load(transition_path)
-    t = data['t']
+    data = np.load(filepath)
     t_win = np.arange(tmin, tmax + 1)
     n_win = len(t_win)
-    
-    pre_Y = data['pre_Y']
-    pre_K = data['pre_K']
-    pre_TFP = data['pre_TFP']
-    pre_w = data['pre_w']
-    pre_r = data['pre_r']
-    
-    print(f"DEBUG: Loaded Data from {transition_path}")
-    print(f"DEBUG: pre_Y={pre_Y:.4f}, pre_K={pre_K:.4f}")
 
-    # --- POPULATE PLOTTING DATA ---
+    pre_Y = float(data['pre_Y'])
+    pre_K = float(data['pre_K'])
+    pre_TFP = float(data['pre_TFP'])
+    pre_r = float(data['pre_r'])
+
+    # Populate arrays
     Y_plot = np.zeros(n_win)
     K_plot = np.zeros(n_win)
     TFP_plot = np.zeros(n_win)
-    w_plot = np.zeros(n_win)
     r_plot = np.zeros(n_win)
-    
+
     for i, tt in enumerate(t_win):
         if tt < 0:
             Y_plot[i] = pre_Y
             K_plot[i] = pre_K
             TFP_plot[i] = pre_TFP
-            w_plot[i] = pre_w
             r_plot[i] = pre_r
         else:
             t_idx = int(tt)
@@ -213,90 +206,229 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
                 Y_plot[i] = data['Y'][t_idx]
                 K_plot[i] = data['K'][t_idx]
                 TFP_plot[i] = data['TFP'][t_idx]
-                w_plot[i] = data['w'][t_idx]
                 r_plot[i] = data['r'][t_idx]
             else:
                 Y_plot[i] = data['Y'][-1]
                 K_plot[i] = data['K'][-1]
                 TFP_plot[i] = data['TFP'][-1]
-                w_plot[i] = data['w'][-1]
                 r_plot[i] = data['r'][-1]
 
-    # --- CALCULATE INVESTMENT ---
-    delta = 0.06 
+    # Compute investment rate as deviation from pre-reform
+    # I_t = K_{t+1} - (1-delta)*K_t, then I/Y deviation
+    delta = DELTA
+    IY_pre = (delta * pre_K) / pre_Y  # Steady state I/Y = delta*K/Y
     IY_dev = np.zeros(n_win)
-    IY_pre = (delta * pre_K) / pre_Y
-    
+
+    # Use the full K series for proper calculation
+    K_full = np.concatenate([[pre_K] * abs(tmin), data['K'][:]])
+
     for i, tt in enumerate(t_win):
-        kt = K_plot[i]
-        tt_next = tt + 1
-        if tt_next < 0:
-            kt_next = pre_K
-        elif tt_next < len(data['K']):
-            kt_next = data['K'][int(tt_next)]
+        idx = tt - tmin  # Index into K_full
+        if idx + 1 < len(K_full):
+            kt = K_full[idx]
+            kt_next = K_full[idx + 1]
         else:
-            kt_next = data['K'][-1]
-        
-        it = kt_next - (1-delta)*kt
+            kt = K_full[-1]
+            kt_next = K_full[-1]  # Steady state
+
+        it = kt_next - (1 - delta) * kt
         yt = Y_plot[i]
-        iy_ratio = it / yt if yt != 0 else 0
+        iy_ratio = it / yt if yt > 1e-10 else 0
         IY_dev[i] = iy_ratio - IY_pre
 
-    # --- NORMALIZE TRANSITION VARS ---
-    Y_n   = Y_plot / pre_Y
-    K_n   = K_plot / pre_K
-    TFP_n = TFP_plot / pre_TFP
-    w_n   = w_plot / pre_w
-    r_val = r_plot 
-    
-    print(f"DEBUG: Normalized Y[0] = {Y_n[t_win==0][0]:.4f}")
+    # Load micro metrics if available
+    avg_z = data.get('avg_z_entre', None)
+    ws_top5 = data.get('wealth_share_top5', None)
+    pre_avg_z = float(data.get('pre_avg_z_entre', 1.0))
+    pre_ws_top5 = float(data.get('pre_wealth_share_top5', 0.25))
 
+    avg_z_plot = np.zeros(n_win)
+    ws_top5_plot = np.zeros(n_win)
+
+    if avg_z is not None and len(avg_z) > 0:
+        for i, tt in enumerate(t_win):
+            if tt < 0:
+                avg_z_plot[i] = pre_avg_z
+                ws_top5_plot[i] = pre_ws_top5
+            else:
+                t_idx = int(tt)
+                if t_idx < len(avg_z):
+                    avg_z_plot[i] = avg_z[t_idx]
+                    ws_top5_plot[i] = ws_top5[t_idx]
+                else:
+                    avg_z_plot[i] = avg_z[-1]
+                    ws_top5_plot[i] = ws_top5[-1]
+
+    # Post-reform steady state values (from end of transition)
+    post_Y = float(data['Y'][-1])
+    post_K = float(data['K'][-1])
+    post_TFP = float(data['TFP'][-1])
+    post_r = float(data['r'][-1])
+
+    # Post-reform I/Y in steady state
+    IY_post = (delta * post_K) / post_Y
+    IY_dev_post = IY_post - IY_pre  # Deviation from pre-reform
+
+    return {
+        't_win': t_win,
+        'Y_n': Y_plot / pre_Y,
+        'K_n': K_plot / pre_K,
+        'TFP_n': TFP_plot / pre_TFP,
+        'r': r_plot,
+        'IY_dev': IY_dev,
+        'avg_z_n': avg_z_plot / pre_avg_z if pre_avg_z > 0 else avg_z_plot,
+        'ws_top5': ws_top5_plot,
+        # Pre-reform values (normalized = 1.0 for Y, K, TFP)
+        'pre_Y': pre_Y, 'pre_K': pre_K, 'pre_TFP': pre_TFP, 'pre_r': pre_r,
+        # Post-reform steady state values (normalized)
+        'post_Y_n': post_Y / pre_Y,
+        'post_K_n': post_K / pre_K,
+        'post_TFP_n': post_TFP / pre_TFP,
+        'post_r': post_r,
+        'IY_dev_post': IY_dev_post,
+        'pre_avg_z_n': 1.0,  # Normalized pre = 1.0
+        'post_avg_z_n': avg_z_plot[-1] / pre_avg_z if pre_avg_z > 0 else 1.0,
+        'pre_ws_top5': pre_ws_top5,
+        'post_ws_top5': ws_top5_plot[-1] if len(ws_top5_plot) > 0 else 0.0,
+    }
+
+
+def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
+    """
+    Plots transition dynamics comparing benchmark (λ=1.35) and neoclassical (λ=∞).
+    Replicates Figures 3, 4, and 5 from Buera & Shin (2013).
+    """
+    # Load benchmark transition
+    bench = load_transition_data(transition_path, tmin, tmax)
+    if bench is None:
+        print(f"File not found: {transition_path}")
+        return
+
+    # Try to load neoclassical comparison
+    nc_path = os.path.join(outdir, "transition_neoclassical.npz")
+    nc = load_transition_data(nc_path, tmin, tmax)
+
+    t_win = bench['t_win']
+
+    print(f"Loaded benchmark transition: pre_Y={bench['pre_Y']:.4f}, pre_K={bench['pre_K']:.4f}")
+    if nc:
+        print(f"Loaded neoclassical transition for comparison")
+
+    # =========================================================================
+    # Figure 3 & 4: Aggregate Dynamics
+    # =========================================================================
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-    
-    def style_subplot(ax, x, y, title, ylabel=None, is_level=False):
+
+    def plot_series(ax, x, y_bench, y_nc, title, pre_ss=None, post_ss=None, is_level=False):
         mask_pre = x < 0
         mask_post = x >= 0
-        
+
+        # Benchmark (λ=1.35) - solid black
         if np.any(mask_pre):
-            ax.plot(x[mask_pre], y[mask_pre], color='black', linewidth=3.0)
+            ax.plot(x[mask_pre], y_bench[mask_pre], color='black', linewidth=2.5)
         if np.any(mask_post):
-            ax.plot(x[mask_post], y[mask_post], color='black', linewidth=3.0)
-             
-        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=1.0)
-        
-        if not is_level:
-             # Logic to detect if normalized (centered at 1) or deviation (centered at 0)
-             # Normalized values are usually > 0.5.
-             ref_val = 1.0 if np.mean(np.abs(y)) > 0.5 else 0.0
-             ax.axhline(ref_val, color='gray', linestyle='-', linewidth=0.5)
-        
+            ax.plot(x[mask_post], y_bench[mask_post], color='black', linewidth=2.5, label='λ=1.35')
+
+        # Neoclassical (λ=∞) - dotted
+        if y_nc is not None:
+            if np.any(mask_pre):
+                ax.plot(x[mask_pre], y_nc[mask_pre], color='black', linewidth=2.0, linestyle=':')
+            if np.any(mask_post):
+                ax.plot(x[mask_post], y_nc[mask_post], color='black', linewidth=2.0, linestyle=':', label='λ=∞')
+
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
+
+        # Pre-reform steady state reference line (blue dashed)
+        if pre_ss is not None:
+            ax.axhline(pre_ss, color='#1f77b4', linestyle='--', linewidth=1.5, alpha=0.8, label='Pre-SS')
+
+        # Post-reform steady state reference line (red dashed)
+        if post_ss is not None:
+            ax.axhline(post_ss, color='#d62728', linestyle='--', linewidth=1.5, alpha=0.8, label='Post-SS')
+
         ax.set_title(title, fontsize=14)
-        if ylabel: ax.set_ylabel(ylabel, fontsize=12)
         ax.tick_params(direction='in', length=5)
         ax.spines['right'].set_visible(True)
         ax.spines['top'].set_visible(True)
         ax.xaxis.set_ticks_position('both')
         ax.yaxis.set_ticks_position('both')
-        
-    style_subplot(axes[0,0], t_win, Y_n, "GDP (normalized)")
-    style_subplot(axes[0,1], t_win, TFP_n, "TFP Measure (normalized)")
-    style_subplot(axes[0,2], t_win, IY_dev, "Investment Rate (deviation)")
-    
-    style_subplot(axes[1,0], t_win, K_n, "Capital Stock (normalized)")
-    style_subplot(axes[1,1], t_win, r_val, "Interest Rates (Level)", is_level=True)
-    
-    axes[1,2].axis('off')
+
+    # Row 1: GDP, TFP, Investment Rate
+    plot_series(axes[0, 0], t_win, bench['Y_n'], nc['Y_n'] if nc else None, "GDP (normalized)",
+                pre_ss=1.0, post_ss=bench['post_Y_n'])
+    plot_series(axes[0, 1], t_win, bench['TFP_n'], nc['TFP_n'] if nc else None, "TFP Measure (normalized)",
+                pre_ss=1.0, post_ss=bench['post_TFP_n'])
+    plot_series(axes[0, 2], t_win, bench['IY_dev'], nc['IY_dev'] if nc else None,
+                "Investment Rate (deviation)", pre_ss=0.0, post_ss=bench['IY_dev_post'])
+
+    # Row 2: Capital, Interest Rates
+    plot_series(axes[1, 0], t_win, bench['K_n'], nc['K_n'] if nc else None, "Capital Stock (normalized)",
+                pre_ss=1.0, post_ss=bench['post_K_n'])
+    plot_series(axes[1, 1], t_win, bench['r'], nc['r'] if nc else None, "Interest Rates (level)",
+                pre_ss=bench['pre_r'], post_ss=bench['post_r'], is_level=True)
+
+    # Legend in bottom right panel
+    axes[1, 2].axis('off')
+    # Add a combined legend
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        axes[1, 2].legend(handles, labels, loc='center', frameon=True, fontsize=12)
 
     for ax in axes.flat:
         if ax.get_visible():
             ax.set_xlabel("Years after reform")
-            ax.set_xlim(-4, 20)
+            ax.set_xlim(tmin, tmax)
 
     plt.tight_layout()
     save_path = os.path.join(outdir, "fig_paper_replication.png")
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"Generated: {save_path}")
+
+    # =========================================================================
+    # Figure 5: Micro Implications (if data available)
+    # =========================================================================
+    if np.any(bench['avg_z_n'] > 0):
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Avg Entrepreneurial Ability (normalized)
+        ax = axes[0]
+        mask_pre = t_win < 0
+        mask_post = t_win >= 0
+        if np.any(mask_pre):
+            ax.plot(t_win[mask_pre], bench['avg_z_n'][mask_pre], color='black', linewidth=2.5)
+        if np.any(mask_post):
+            ax.plot(t_win[mask_post], bench['avg_z_n'][mask_post], color='black', linewidth=2.5)
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
+        ax.axhline(1.0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+        ax.set_title("Avg. Entrep. Ability (normalized)", fontsize=14)
+        ax.set_xlabel("Years after reform")
+        ax.set_xlim(tmin, tmax)
+
+        # Wealth Share of Top 5% Ability
+        ax = axes[1]
+        if np.any(mask_pre):
+            ax.plot(t_win[mask_pre], bench['ws_top5'][mask_pre], color='black', linewidth=2.5)
+        if np.any(mask_post):
+            ax.plot(t_win[mask_post], bench['ws_top5'][mask_post], color='black', linewidth=2.5)
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
+        ax.set_title("Wealth Share of Top 5% Ability", fontsize=14)
+        ax.set_xlabel("Years after reform")
+        ax.set_xlim(tmin, tmax)
+        ax.set_ylim(0, 0.7)
+
+        for ax in axes:
+            ax.tick_params(direction='in', length=5)
+            ax.spines['right'].set_visible(True)
+            ax.spines['top'].set_visible(True)
+
+        plt.tight_layout()
+        save_path = os.path.join(outdir, "fig_micro_implications.png")
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+        print(f"Generated: {save_path}")
+    else:
+        print("  Skipping micro implications plot (no data available)")
 
 def plot_wealth_distribution(steady_states_path, outdir):
     if not os.path.exists(steady_states_path):
