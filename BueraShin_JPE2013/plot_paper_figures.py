@@ -315,73 +315,87 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
         print(f"Loaded neoclassical transition for comparison")
 
     # =========================================================================
-    # Figure 3 & 4: Aggregate Dynamics
+    # Helper function for plotting series
     # =========================================================================
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-
-    def plot_series(ax, x, y_bench, y_nc, title, pre_ss=None, post_ss=None, is_level=False):
+    def plot_series(ax, x, y_bench, y_nc, title, pre_ss=None, post_ss=None, ylabel=None):
         mask_pre = x < 0
         mask_post = x >= 0
 
         # Benchmark (λ=1.35) - solid black
         if np.any(mask_pre):
-            ax.plot(x[mask_pre], y_bench[mask_pre], color='black', linewidth=2.5)
+            ax.plot(x[mask_pre], y_bench[mask_pre], color='black', linewidth=2.0)
         if np.any(mask_post):
-            ax.plot(x[mask_post], y_bench[mask_post], color='black', linewidth=2.5, label='λ=1.35')
+            ax.plot(x[mask_post], y_bench[mask_post], color='black', linewidth=2.0, label='$\\lambda$=1.35')
 
         # Neoclassical (λ=∞) - dotted
         if y_nc is not None:
             if np.any(mask_pre):
-                ax.plot(x[mask_pre], y_nc[mask_pre], color='black', linewidth=2.0, linestyle=':')
+                ax.plot(x[mask_pre], y_nc[mask_pre], color='gray', linewidth=1.8, linestyle=':')
             if np.any(mask_post):
-                ax.plot(x[mask_post], y_nc[mask_post], color='black', linewidth=2.0, linestyle=':', label='λ=∞')
+                ax.plot(x[mask_post], y_nc[mask_post], color='gray', linewidth=1.8, linestyle=':', label='$\\lambda$=$\\infty$')
 
-        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.6, alpha=0.5)
 
         # Pre-reform steady state reference line (blue dashed)
         if pre_ss is not None:
-            ax.axhline(pre_ss, color='#1f77b4', linestyle='--', linewidth=1.5, alpha=0.8, label='Pre-SS')
+            ax.axhline(pre_ss, color='#1f77b4', linestyle='--', linewidth=1.2, alpha=0.7)
 
         # Post-reform steady state reference line (red dashed)
         if post_ss is not None:
-            ax.axhline(post_ss, color='#d62728', linestyle='--', linewidth=1.5, alpha=0.8, label='Post-SS')
+            ax.axhline(post_ss, color='#d62728', linestyle='--', linewidth=1.2, alpha=0.7)
 
-        ax.set_title(title, fontsize=14)
-        ax.tick_params(direction='in', length=5)
-        ax.spines['right'].set_visible(True)
-        ax.spines['top'].set_visible(True)
-        ax.xaxis.set_ticks_position('both')
-        ax.yaxis.set_ticks_position('both')
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=10)
+        ax.tick_params(direction='in', length=4, labelsize=9)
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
 
-    # Row 1: GDP, TFP, Investment Rate
-    plot_series(axes[0, 0], t_win, bench['Y_n'], nc['Y_n'] if nc else None, "GDP (normalized)",
-                pre_ss=1.0, post_ss=bench['post_Y_n'])
-    plot_series(axes[0, 1], t_win, bench['TFP_n'], nc['TFP_n'] if nc else None, "TFP Measure (normalized)",
+    # =========================================================================
+    # Figure 3: Aggregate Dynamics I (GDP, TFP, Investment Rate) - 1x3
+    # =========================================================================
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
+
+    plot_series(axes[0], t_win, bench['Y_n'], nc['Y_n'] if nc else None, "GDP",
+                pre_ss=1.0, post_ss=bench['post_Y_n'], ylabel="Normalized")
+    plot_series(axes[1], t_win, bench['TFP_n'], nc['TFP_n'] if nc else None, "TFP",
                 pre_ss=1.0, post_ss=bench['post_TFP_n'])
-    plot_series(axes[0, 2], t_win, bench['IY_dev'], nc['IY_dev'] if nc else None,
-                "Investment Rate (deviation)", pre_ss=0.0, post_ss=bench['IY_dev_post'])
+    plot_series(axes[2], t_win, bench['IY_dev'], nc['IY_dev'] if nc else None, "Investment Rate",
+                pre_ss=0.0, post_ss=bench['IY_dev_post'], ylabel="Deviation")
 
-    # Row 2: Capital, Interest Rates
-    plot_series(axes[1, 0], t_win, bench['K_n'], nc['K_n'] if nc else None, "Capital Stock (normalized)",
-                pre_ss=1.0, post_ss=bench['post_K_n'])
-    plot_series(axes[1, 1], t_win, bench['r'], nc['r'] if nc else None, "Interest Rates (level)",
-                pre_ss=bench['pre_r'], post_ss=bench['post_r'], is_level=True)
+    for ax in axes:
+        ax.set_xlabel("Years", fontsize=10)
+        ax.set_xlim(tmin, tmax)
 
-    # Legend in bottom right panel
-    axes[1, 2].axis('off')
-    # Add a combined legend
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        axes[1, 2].legend(handles, labels, loc='center', frameon=True, fontsize=12)
-
-    for ax in axes.flat:
-        if ax.get_visible():
-            ax.set_xlabel("Years after reform")
-            ax.set_xlim(tmin, tmax)
+    # Add legend to first plot
+    axes[0].legend(loc='lower right', frameon=False, fontsize=8)
 
     plt.tight_layout()
-    save_path = os.path.join(outdir, "fig_paper_replication.png")
-    plt.savefig(save_path, dpi=200)
+    save_path = os.path.join(outdir, "fig_aggregate_dynamics_I.png")
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"Generated: {save_path}")
+
+    # =========================================================================
+    # Figure 4: Aggregate Dynamics II (Capital, Interest Rates) - 1x2
+    # =========================================================================
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.5))
+
+    plot_series(axes[0], t_win, bench['K_n'], nc['K_n'] if nc else None, "Capital Stock",
+                pre_ss=1.0, post_ss=bench['post_K_n'], ylabel="Normalized")
+    plot_series(axes[1], t_win, bench['r'], nc['r'] if nc else None, "Interest Rate",
+                pre_ss=bench['pre_r'], post_ss=bench['post_r'], ylabel="Level")
+
+    for ax in axes:
+        ax.set_xlabel("Years", fontsize=10)
+        ax.set_xlim(tmin, tmax)
+
+    # Add legend
+    axes[0].legend(loc='lower right', frameon=False, fontsize=8)
+
+    plt.tight_layout()
+    save_path = os.path.join(outdir, "fig_aggregate_dynamics_II.png")
+    plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -389,42 +403,80 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
     # Figure 5: Micro Implications (if data available)
     # =========================================================================
     if np.any(bench['avg_z_n'] > 0):
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        from matplotlib.lines import Line2D
 
-        # Avg Entrepreneurial Ability (normalized)
-        ax = axes[0]
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+
         mask_pre = t_win < 0
         mask_post = t_win >= 0
+
+        # --- Left: Avg Entrepreneurial Ability (normalized) ---
+        ax = axes[0]
+        # Main transition line
         if np.any(mask_pre):
-            ax.plot(t_win[mask_pre], bench['avg_z_n'][mask_pre], color='black', linewidth=2.5)
+            ax.plot(t_win[mask_pre], bench['avg_z_n'][mask_pre], color='black', linewidth=2.0)
         if np.any(mask_post):
-            ax.plot(t_win[mask_post], bench['avg_z_n'][mask_post], color='black', linewidth=2.5)
-        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
-        ax.axhline(1.0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
-        ax.set_title("Avg. Entrep. Ability (normalized)", fontsize=14)
-        ax.set_xlabel("Years after reform")
+            ax.plot(t_win[mask_post], bench['avg_z_n'][mask_post], color='black', linewidth=2.0)
+
+        # Reform line
+        ax.axvline(0, color='#7f7f7f', linestyle='-', linewidth=0.8, alpha=0.6)
+
+        # Reference lines
+        ax.axhline(bench['pre_avg_z_n'], color='#2980b9', linestyle='--', linewidth=1.2, alpha=0.8)
+        ax.axhline(bench['post_avg_z_n'], color='#c0392b', linestyle='--', linewidth=1.2, alpha=0.8)
+
+        ax.set_title("Avg. Entrepreneurial Ability", fontsize=12, fontweight='bold')
+        ax.set_xlabel("Years after reform", fontsize=10)
+        ax.set_ylabel("Normalized", fontsize=10)
         ax.set_xlim(tmin, tmax)
 
-        # Wealth Share of Top 5% Ability
+        # Subplot legend
+        legend_left = [
+            Line2D([0], [0], color='black', linewidth=2, label='Transition'),
+            Line2D([0], [0], color='#2980b9', linestyle='--', linewidth=1.2, label='Pre-reform SS'),
+            Line2D([0], [0], color='#c0392b', linestyle='--', linewidth=1.2, label='Post-reform SS'),
+        ]
+        ax.legend(handles=legend_left, loc='lower right', fontsize=8, frameon=True,
+                  fancybox=False, edgecolor='#ccc')
+
+        # --- Right: Wealth Share of Top 5% Ability ---
         ax = axes[1]
         if np.any(mask_pre):
-            ax.plot(t_win[mask_pre], bench['ws_top5'][mask_pre], color='black', linewidth=2.5)
+            ax.plot(t_win[mask_pre], bench['ws_top5'][mask_pre], color='black', linewidth=2.0)
         if np.any(mask_post):
-            ax.plot(t_win[mask_post], bench['ws_top5'][mask_post], color='black', linewidth=2.5)
-        ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.7)
-        ax.set_title("Wealth Share of Top 5% Ability", fontsize=14)
-        ax.set_xlabel("Years after reform")
-        ax.set_xlim(tmin, tmax)
-        ax.set_ylim(0, 0.7)
+            ax.plot(t_win[mask_post], bench['ws_top5'][mask_post], color='black', linewidth=2.0)
 
+        # Reform line
+        ax.axvline(0, color='#7f7f7f', linestyle='-', linewidth=0.8, alpha=0.6)
+
+        # Reference lines
+        ax.axhline(bench['pre_ws_top5'], color='#2980b9', linestyle='--', linewidth=1.2, alpha=0.8)
+        ax.axhline(bench['post_ws_top5'], color='#c0392b', linestyle='--', linewidth=1.2, alpha=0.8)
+
+        ax.set_title("Wealth Share of Top 5% Ability", fontsize=12, fontweight='bold')
+        ax.set_xlabel("Years after reform", fontsize=10)
+        ax.set_ylabel("Share", fontsize=10)
+        ax.set_xlim(tmin, tmax)
+        ax.set_ylim(0, 0.65)
+
+        # Subplot legend
+        legend_right = [
+            Line2D([0], [0], color='black', linewidth=2, label='Transition'),
+            Line2D([0], [0], color='#2980b9', linestyle='--', linewidth=1.2, label='Pre-reform SS'),
+            Line2D([0], [0], color='#c0392b', linestyle='--', linewidth=1.2, label='Post-reform SS'),
+        ]
+        ax.legend(handles=legend_right, loc='lower right', fontsize=8, frameon=True,
+                  fancybox=False, edgecolor='#ccc')
+
+        # Common formatting
         for ax in axes:
-            ax.tick_params(direction='in', length=5)
-            ax.spines['right'].set_visible(True)
-            ax.spines['top'].set_visible(True)
+            ax.tick_params(direction='in', length=4, labelsize=9)
+            ax.spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
 
         plt.tight_layout()
         save_path = os.path.join(outdir, "fig_micro_implications.png")
-        plt.savefig(save_path, dpi=200)
+        plt.savefig(save_path, dpi=300)
         plt.close()
         print(f"Generated: {save_path}")
     else:
@@ -605,6 +657,40 @@ def plot_asset_policy_contour(steady_states_path, outdir):
     plt.close()
     print(f"Generated: {save_path}")
 
+def compute_profit_margin(a, z, w, r, lam, delta, alpha, nu, tau=0.0):
+    """
+    Computes (profit - wage) / wage as a continuous measure.
+    Positive = entrepreneur, negative = worker.
+    This gives smoother contours than binary 0/1.
+    """
+    z_eff = (1.0 - tau) * z
+    if z_eff <= 0:
+        return -1.0  # Definitely worker
+
+    rental = r + delta
+    span = 1.0 - nu
+    wage = max(w, 1e-10)
+
+    # Optimal unconstrained k
+    aux1 = (alpha * span * z_eff) / max(rental, 1e-10)
+    aux2 = ((1.0 - alpha) * span * z_eff) / wage
+    exp1 = 1.0 - (1.0 - alpha) * span
+    exp2 = (1.0 - alpha) * span
+
+    k_uncon = (aux1 ** exp1 * aux2 ** exp2) ** (1.0 / nu)
+    k = min(k_uncon, lam * a)
+
+    # Labor from FOC given k
+    l = (aux2 * (k ** (alpha * span))) ** (1.0 / exp1)
+
+    # Output and Profit
+    y = z_eff * ((k ** alpha) * (l ** (1.0 - alpha))) ** span
+    profit = y - wage * l - rental * k
+
+    # Return normalized margin (positive = entrepreneur)
+    return (profit - wage) / wage
+
+
 def plot_occupational_choice_contour(steady_states_path, outdir):
     if not os.path.exists(steady_states_path):
         print(f"File not found: {steady_states_path}")
@@ -613,99 +699,102 @@ def plot_occupational_choice_contour(steady_states_path, outdir):
     data = np.load(steady_states_path)
     a_grid = data['a_grid']
     z_grid = data['z_grid']
-    
+
     # Prices
     post_w, post_r = data['post_w'], data['post_r']
     pre_w, pre_r = data['pre_w'], data['pre_r']
-    
-    # Create dense grid
-    limit_a = 50.0 
-    a_dense = np.linspace(a_grid[0], limit_a, 200)
-    z_dense = np.linspace(z_grid[0], z_grid[-1], 200)
+
+    # Higher resolution grid for smoother boundaries
+    limit_a = 50.0
+    n_pts = 400  # High resolution to show grid limitations clearly
+    a_dense = np.linspace(a_grid[0], limit_a, n_pts)
+    z_dense = np.linspace(z_grid[0], min(z_grid[-1], 3.0), n_pts)
     AA, ZZ = np.meshgrid(a_dense, z_dense, indexing='ij')
 
-    # Compute choices
-    OCC_post = np.zeros(AA.shape)
-    OCC_pre_plus = np.zeros(AA.shape)
-    OCC_pre_minus = np.zeros(AA.shape)
-    
+    # Compute profit margins (continuous, not binary)
+    PM_post = np.zeros(AA.shape)
+    PM_pre_plus = np.zeros(AA.shape)
+    PM_pre_minus = np.zeros(AA.shape)
+
     for i in range(len(a_dense)):
         for j in range(len(z_dense)):
-            OCC_post[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], post_w, post_r, LAMBDA, DELTA, ALPHA, NU, tau=0.0)
-            OCC_pre_plus[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], pre_w, pre_r, LAMBDA, DELTA, ALPHA, NU, tau=TAU_PLUS)
-            OCC_pre_minus[i, j] = solve_occupational_choice(a_dense[i], z_dense[j], pre_w, pre_r, LAMBDA, DELTA, ALPHA, NU, tau=TAU_MINUS)
+            PM_post[i, j] = compute_profit_margin(a_dense[i], z_dense[j], post_w, post_r,
+                                                   LAMBDA, DELTA, ALPHA, NU, tau=0.0)
+            PM_pre_plus[i, j] = compute_profit_margin(a_dense[i], z_dense[j], pre_w, pre_r,
+                                                       LAMBDA, DELTA, ALPHA, NU, tau=TAU_PLUS)
+            PM_pre_minus[i, j] = compute_profit_margin(a_dense[i], z_dense[j], pre_w, pre_r,
+                                                        LAMBDA, DELTA, ALPHA, NU, tau=TAU_MINUS)
 
-    # Pre-reform aggregate choice for shading: 
-    # 0 = Worker for both
-    # 1 = Entre for subsidized only (Sensitive zone)
-    # 2 = Entre for both
+    # No smoothing - show raw grid resolution
+
+    # Convert to binary for shading (threshold at 0)
+    OCC_post = (PM_post > 0).astype(float)
+    OCC_pre_plus = (PM_pre_plus > 0).astype(float)
+    OCC_pre_minus = (PM_pre_minus > 0).astype(float)
     OCC_pre_agg = OCC_pre_plus + OCC_pre_minus
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 9))
-    
-    # Precise Color Palette
-    color_worker = '#F8F9F9'  # Very Light Gray
-    color_entre  = '#FEEBEE'  # Soft Peach/Red
-    color_zone   = '#E3F2FD'  # Soft Sky Blue
+    # Professional color scheme - cleaner
+    color_worker = '#ffffff'      # White for workers
+    color_entre = '#e8e8e8'       # Light gray for entrepreneurs
+    color_zone = '#c6dbef'        # Light blue for distortion-dependent zone
 
-    # Create handles for the legend
-    patch_worker = mpatches.Patch(color=color_worker, label='Always Worker')
-    patch_zone   = mpatches.Patch(color=color_zone, label='Dependent on distortion draw')
-    patch_entre  = mpatches.Patch(color=color_entre, label='Always Entrepreneur')
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 10))
-    
-    # --- Plot 1: Pre-Reform ---
+    # --- Pre-Reform ---
     ax = axes[0]
-    ax.contourf(AA, ZZ, OCC_pre_agg, levels=[-0.5, 0.5, 1.5, 2.5], colors=[color_worker, color_zone, color_entre])
-    
-    l1 = ax.contour(AA, ZZ, OCC_pre_plus, levels=[0.5], colors='#D32F2F', linewidths=3.5)
-    l3 = ax.contour(AA, ZZ, OCC_pre_minus, levels=[0.5], colors='#388E3C', linewidths=3.5)
-    
-    ax.set_title("Pre-Reform Choice Boundary", fontsize=20, fontweight='bold', pad=20)
-    
-    # --- Plot 2: Post-Reform ---
+    ax.contourf(AA, ZZ, OCC_pre_agg, levels=[-0.5, 0.5, 1.5, 2.5],
+                colors=[color_worker, color_zone, color_entre], antialiased=True)
+
+    # Smooth contour lines at the zero-crossing of profit margin
+    cs_tax = ax.contour(AA, ZZ, PM_pre_plus, levels=[0], colors='#c0392b', linewidths=2.0)
+    cs_sub = ax.contour(AA, ZZ, PM_pre_minus, levels=[0], colors='#2980b9', linewidths=2.0)
+
+    ax.set_title("Pre-Reform", fontsize=12, fontweight='bold')
+    ax.set_xlabel("Assets $a$", fontsize=10)
+    ax.set_ylabel("Ability $z$", fontsize=10)
+
+    # Subplot-specific legend
+    from matplotlib.lines import Line2D
+    legend_pre = [
+        Line2D([0], [0], color='#c0392b', linewidth=2, label=f'Taxed ($\\tau^+$={TAU_PLUS})'),
+        Line2D([0], [0], color='#2980b9', linewidth=2, label=f'Subsidized ($\\tau^-$={TAU_MINUS})'),
+        mpatches.Patch(facecolor=color_worker, edgecolor='#999', label='Worker'),
+        mpatches.Patch(facecolor=color_zone, edgecolor='#999', label='Depends on $\\tau$'),
+        mpatches.Patch(facecolor=color_entre, edgecolor='#999', label='Entrepreneur'),
+    ]
+    ax.legend(handles=legend_pre, loc='upper right', fontsize=7, frameon=True,
+              fancybox=False, edgecolor='#ccc')
+
+    # --- Post-Reform ---
     ax = axes[1]
-    ax.contourf(AA, ZZ, OCC_post, levels=[-0.5, 0.5, 1.5], colors=[color_worker, color_entre])
-    l_post = ax.contour(AA, ZZ, OCC_post, levels=[0.5], colors='black', linewidths=3.5)
-    ax.set_title("Post-Reform Choice Boundary", fontsize=20, fontweight='bold', pad=20)
-    
-    # Common Formatting
+    ax.contourf(AA, ZZ, OCC_post, levels=[-0.5, 0.5, 1.5],
+                colors=[color_worker, color_entre], antialiased=True)
+
+    cs_post = ax.contour(AA, ZZ, PM_post, levels=[0], colors='black', linewidths=2.0)
+
+    ax.set_title("Post-Reform", fontsize=12, fontweight='bold')
+    ax.set_xlabel("Assets $a$", fontsize=10)
+
+    # Subplot-specific legend
+    legend_post = [
+        Line2D([0], [0], color='black', linewidth=2, label='Entry threshold'),
+        mpatches.Patch(facecolor=color_worker, edgecolor='#999', label='Worker'),
+        mpatches.Patch(facecolor=color_entre, edgecolor='#999', label='Entrepreneur'),
+    ]
+    ax.legend(handles=legend_post, loc='upper right', fontsize=7, frameon=True,
+              fancybox=False, edgecolor='#ccc')
+
+    # Common formatting
     for ax in axes:
-        ax.set_xlabel("Assets $a$", fontsize=16)
-        ax.set_ylabel("Ability $z$", fontsize=16)
-        ax.grid(True, linestyle=':', alpha=0.5)
+        ax.set_xlim(0, limit_a)
+        ax.set_ylim(z_dense[0], z_dense[-1])
+        ax.tick_params(direction='in', length=4, labelsize=9)
         ax.spines['right'].set_visible(False)
         ax.spines['top'].set_visible(False)
-        ax.set_xlim(0, limit_a)
-        ax.set_ylim(z_grid[0], z_grid[-1])
-        ax.tick_params(axis='both', which='major', labelsize=12)
 
-    # Create a Unified Legend at the bottom
-    h1, _ = l1.legend_elements(); h3, _ = l3.legend_elements(); hp, _ = l_post.legend_elements()
-    
-    handles = [
-        h1[0], h3[0], hp[0],
-        patch_worker, patch_zone, patch_entre
-    ]
-    labels = [
-        f'Threshold (Taxed $\\tau={TAU_PLUS}$)',
-        f'Threshold (Subsidized $\\tau={TAU_MINUS}$)',
-        'Unified Entry Threshold',
-        'Always Worker Region',
-        'Dependent on distortion draw',
-        'Always Entrepreneur Region'
-    ]
-    
-    fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=16, 
-               frameon=True, facecolor='white', framealpha=1.0, shadow=True,
-               bbox_to_anchor=(0.5, -0.05))
-
-    plt.suptitle("Impact of Distortions on Occupational Choice", fontsize=26, fontweight='bold', y=1.05)
     plt.tight_layout()
-    
     save_path = os.path.join(outdir, "fig_occupational_contour.png")
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Generated: {save_path}")
 
