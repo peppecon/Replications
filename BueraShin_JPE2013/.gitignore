@@ -2,3 +2,6 @@ __pycache__/
 *.nbc
 *.nbi
 .DS_Store
+extensions
+optimized_GPU
+

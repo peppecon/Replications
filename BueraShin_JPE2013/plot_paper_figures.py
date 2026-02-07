@@ -412,16 +412,23 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
 
         # --- Left: Avg Entrepreneurial Ability (normalized) ---
         ax = axes[0]
-        # Main transition line
+        # Benchmark transition (λ=1.35) - solid black
         if np.any(mask_pre):
             ax.plot(t_win[mask_pre], bench['avg_z_n'][mask_pre], color='black', linewidth=2.0)
         if np.any(mask_post):
-            ax.plot(t_win[mask_post], bench['avg_z_n'][mask_post], color='black', linewidth=2.0)
+            ax.plot(t_win[mask_post], bench['avg_z_n'][mask_post], color='black', linewidth=2.0, label='$\\lambda$=1.35')
+
+        # Neoclassical (λ=∞) - dotted gray
+        if nc is not None and np.any(nc['avg_z_n'] > 0):
+            if np.any(mask_pre):
+                ax.plot(t_win[mask_pre], nc['avg_z_n'][mask_pre], color='gray', linewidth=1.8, linestyle=':')
+            if np.any(mask_post):
+                ax.plot(t_win[mask_post], nc['avg_z_n'][mask_post], color='gray', linewidth=1.8, linestyle=':', label='$\\lambda$=$\\infty$')
 
         # Reform line
         ax.axvline(0, color='#7f7f7f', linestyle='-', linewidth=0.8, alpha=0.6)
 
-        # Reference lines
+        # Reference lines (benchmark SS values)
         ax.axhline(bench['pre_avg_z_n'], color='#2980b9', linestyle='--', linewidth=1.2, alpha=0.8)
         ax.axhline(bench['post_avg_z_n'], color='#c0392b', linestyle='--', linewidth=1.2, alpha=0.8)
 
@@ -432,7 +439,8 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
 
         # Subplot legend
         legend_left = [
-            Line2D([0], [0], color='black', linewidth=2, label='Transition'),
+            Line2D([0], [0], color='black', linewidth=2, label='$\\lambda$=1.35'),
+            Line2D([0], [0], color='gray', linewidth=1.8, linestyle=':', label='$\\lambda$=$\\infty$'),
             Line2D([0], [0], color='#2980b9', linestyle='--', linewidth=1.2, label='Pre-reform SS'),
             Line2D([0], [0], color='#c0392b', linestyle='--', linewidth=1.2, label='Post-reform SS'),
         ]
@@ -441,15 +449,23 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
 
         # --- Right: Wealth Share of Top 5% Ability ---
         ax = axes[1]
+        # Benchmark (λ=1.35) - solid black
         if np.any(mask_pre):
             ax.plot(t_win[mask_pre], bench['ws_top5'][mask_pre], color='black', linewidth=2.0)
         if np.any(mask_post):
-            ax.plot(t_win[mask_post], bench['ws_top5'][mask_post], color='black', linewidth=2.0)
+            ax.plot(t_win[mask_post], bench['ws_top5'][mask_post], color='black', linewidth=2.0, label='$\\lambda$=1.35')
+
+        # Neoclassical (λ=∞) - dotted gray
+        if nc is not None and np.any(nc['ws_top5'] > 0):
+            if np.any(mask_pre):
+                ax.plot(t_win[mask_pre], nc['ws_top5'][mask_pre], color='gray', linewidth=1.8, linestyle=':')
+            if np.any(mask_post):
+                ax.plot(t_win[mask_post], nc['ws_top5'][mask_post], color='gray', linewidth=1.8, linestyle=':', label='$\\lambda$=$\\infty$')
 
         # Reform line
         ax.axvline(0, color='#7f7f7f', linestyle='-', linewidth=0.8, alpha=0.6)
 
-        # Reference lines
+        # Reference lines (benchmark SS values)
         ax.axhline(bench['pre_ws_top5'], color='#2980b9', linestyle='--', linewidth=1.2, alpha=0.8)
         ax.axhline(bench['post_ws_top5'], color='#c0392b', linestyle='--', linewidth=1.2, alpha=0.8)
 
@@ -461,7 +477,8 @@ def plot_transition_dynamics(transition_path, outdir, tmin=-4, tmax=20):
 
         # Subplot legend
         legend_right = [
-            Line2D([0], [0], color='black', linewidth=2, label='Transition'),
+            Line2D([0], [0], color='black', linewidth=2, label='$\\lambda$=1.35'),
+            Line2D([0], [0], color='gray', linewidth=1.8, linestyle=':', label='$\\lambda$=$\\infty$'),
             Line2D([0], [0], color='#2980b9', linestyle='--', linewidth=1.2, label='Pre-reform SS'),
             Line2D([0], [0], color='#c0392b', linestyle='--', linewidth=1.2, label='Post-reform SS'),
         ]
@@ -541,6 +558,115 @@ def plot_wealth_distribution(steady_states_path, outdir):
     plt.tight_layout()
     save_path = os.path.join(outdir, "fig_wealth_distribution.png")
     plt.savefig(save_path)
+    plt.close()
+    print(f"Generated: {save_path}")
+
+
+def plot_wealth_distribution_neoclassical(outdir):
+    """
+    Plots wealth distribution comparison between benchmark (λ=1.35) and neoclassical (λ=∞).
+    """
+    bench_path = os.path.join(outdir, "steady_states.npz")
+    nc_path = os.path.join(outdir, "steady_states_neoclassical.npz")
+    
+    if not os.path.exists(bench_path):
+        print(f"File not found: {bench_path}")
+        return
+    if not os.path.exists(nc_path):
+        print(f"Neoclassical steady states not found: {nc_path}")
+        return
+    
+    bench = np.load(bench_path)
+    nc = np.load(nc_path)
+    
+    a_grid = bench['a_grid']
+    
+    # Helper to compute marginal asset distribution
+    def get_asset_mass(data):
+        post_mu = data['post_mu']
+        pre_mu_p = data['pre_mu_p']
+        pre_mu_m = data['pre_mu_m']
+        post_mass = np.sum(post_mu, axis=1)
+        pre_mass = np.sum(pre_mu_p, axis=1) + np.sum(pre_mu_m, axis=1)
+        post_mass /= np.sum(post_mass)
+        pre_mass /= np.sum(pre_mass)
+        return pre_mass, post_mass
+    
+    pre_bench, post_bench = get_asset_mass(bench)
+    pre_nc, post_nc = get_asset_mass(nc)
+    
+    def get_distribution_samples(mass, grid, n_samples=100000):
+        return np.random.choice(grid, size=n_samples, p=mass)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    bins = np.linspace(0, 50, 60)
+    
+    # =====================================================
+    # Row 1: Pre-Reform Distributions
+    # =====================================================
+    # Left: Histogram
+    ax = axes[0, 0]
+    samples_bench = get_distribution_samples(pre_bench, a_grid)
+    samples_nc = get_distribution_samples(pre_nc, a_grid)
+    ax.hist(samples_bench, bins=bins, color='black', alpha=0.4, label='$\\lambda$=1.35', density=True)
+    ax.hist(samples_nc, bins=bins, histtype='step', color='#d62728', linewidth=2, label='$\\lambda$=$\\infty$', density=True)
+    ax.set_title("Pre-Reform: Asset Histogram")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Density")
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.set_xlim(0, 50)
+    
+    # Right: CDF
+    ax = axes[0, 1]
+    ax.plot(a_grid, np.cumsum(pre_bench), color='black', linewidth=2, label='$\\lambda$=1.35')
+    ax.plot(a_grid, np.cumsum(pre_nc), color='#d62728', linewidth=2, linestyle='--', label='$\\lambda$=$\\infty$')
+    ax.set_title("Pre-Reform: Asset CDF")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Cumulative Probability")
+    ax.set_xlim(0, 100)
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.grid(True, linestyle=':', alpha=0.3)
+    
+    # =====================================================
+    # Row 2: Post-Reform Distributions
+    # =====================================================
+    # Left: Histogram
+    ax = axes[1, 0]
+    samples_bench = get_distribution_samples(post_bench, a_grid)
+    samples_nc = get_distribution_samples(post_nc, a_grid)
+    ax.hist(samples_bench, bins=bins, color='black', alpha=0.4, label='$\\lambda$=1.35', density=True)
+    ax.hist(samples_nc, bins=bins, histtype='step', color='#d62728', linewidth=2, label='$\\lambda$=$\\infty$', density=True)
+    ax.set_title("Post-Reform: Asset Histogram")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Density")
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.set_xlim(0, 50)
+    
+    # Right: CDF
+    ax = axes[1, 1]
+    ax.plot(a_grid, np.cumsum(post_bench), color='black', linewidth=2, label='$\\lambda$=1.35')
+    ax.plot(a_grid, np.cumsum(post_nc), color='#d62728', linewidth=2, linestyle='--', label='$\\lambda$=$\\infty$')
+    ax.set_title("Post-Reform: Asset CDF")
+    ax.set_xlabel("Assets $a$")
+    ax.set_ylabel("Cumulative Probability")
+    ax.set_xlim(0, 100)
+    ax.legend(frameon=False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.grid(True, linestyle=':', alpha=0.3)
+    
+    plt.suptitle("Wealth Distribution: Benchmark vs Neoclassical", fontsize=14, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    
+    save_path = os.path.join(outdir, "fig_wealth_distribution_neoclassical.png")
+    plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Generated: {save_path}")
 
@@ -810,6 +936,7 @@ def main():
     
     plot_policy_functions(steady_path, args.out)
     plot_wealth_distribution(steady_path, args.out)
+    plot_wealth_distribution_neoclassical(args.out)  # Compare benchmark vs neoclassical
     plot_transition_dynamics(trans_path, args.out)
     plot_ability_distribution(steady_path, args.out)
     plot_asset_policy_contour(steady_path, args.out)
